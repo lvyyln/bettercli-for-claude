@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'">
+<title>BetterCLI for Claude</title>
+<link rel="stylesheet" href="../../node_modules/@xterm/xterm/css/xterm.css">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="bar sidebar-head">
+      <div class="brand">BetterCLI</div>
+      <button id="btn-new" class="icon-btn" title="New session (Ctrl+T)" aria-label="New session">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>
+      </button>
+    </div>
+    <div id="tree" class="tree"></div>
+    <div class="sidebar-foot">
+      <label class="theme-pick" title="Color theme">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor"></path></svg>
+        <select id="theme" aria-label="Color theme"></select>
+      </label>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="bar tabs-bar">
+      <div id="tabs" class="tabs"></div>
+    </div>
+    <div id="header" class="header hidden">
+      <div class="header-text">
+        <div id="crumb" class="crumb"></div>
+        <div id="title" class="title"></div>
+      </div>
+      <div class="header-actions">
+        <button id="btn-fork" class="btn primary">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="6" cy="5" r="2"></circle><circle cx="18" cy="5" r="2"></circle><circle cx="12" cy="19" r="2"></circle><path d="M6 7v2a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V7M12 12v5"></path></svg>
+          Fork
+        </button>
+        <button id="btn-edit" class="btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 20h4L19 9l-4-4L4 16z"></path></svg>
+          Edit
+        </button>
+      </div>
+    </div>
+    <div id="terminals" class="terminals">
+      <div id="empty" class="empty">
+        <div class="empty-title">No session open</div>
+        <div class="empty-text">Pick a session on the left, or start a new one.</div>
+        <button id="btn-new-empty" class="btn primary">New session</button>
+      </div>
+    </div>
+    <div id="statusbar" class="statusbar"></div>
+  </main>
+</div>
+
+<dialog id="modal">
+  <form id="modal-form" method="dialog">
+    <h2 id="modal-title">New session</h2>
+    <label class="field">Title<input id="f-title" required></label>
+    <label class="field">Group<input id="f-group" list="groups-list"></label>
+    <datalist id="groups-list"></datalist>
+    <label id="cwd-row" class="field">Working directory
+      <span class="row"><input id="f-cwd"><button type="button" id="btn-browse" class="btn">Browse</button></span>
+    </label>
+    <div class="modal-actions">
+      <button type="button" id="btn-remove" class="btn danger">Remove from desk</button>
+      <span class="spacer"></span>
+      <button type="button" id="btn-cancel" class="btn">Cancel</button>
+      <button type="submit" class="btn primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="../../node_modules/@xterm/xterm/lib/xterm.js"></script>
+<script src="../../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+<script src="themes.js"></script>
+<script src="renderer.js"></script>
+</body>
+</html>

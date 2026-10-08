@@ -1,0 +1,21 @@
+const { contextBridge, ipcRenderer } = require('electron');
+
+contextBridge.exposeInMainWorld('desk', {
+  platform: process.platform,
+  getState: () => ipcRenderer.invoke('state:get'),
+  getHistory: () => ipcRenderer.invoke('history:get'),
+  createSession: (fields) => ipcRenderer.invoke('session:create', fields),
+  forkSession: (parentId) => ipcRenderer.invoke('session:fork', parentId),
+  importSession: (fields) => ipcRenderer.invoke('session:import', fields),
+  updateSession: (fields) => ipcRenderer.invoke('session:update', fields),
+  removeSession: (id) => ipcRenderer.invoke('session:remove', id),
+  openPty: (id, cols, rows) => ipcRenderer.invoke('pty:open', { id, cols, rows }),
+  killPty: (id) => ipcRenderer.invoke('pty:kill', id),
+  write: (id, data) => ipcRenderer.send('pty:write', { id, data }),
+  resize: (id, cols, rows) => ipcRenderer.send('pty:resize', { id, cols, rows }),
+  pickDir: () => ipcRenderer.invoke('dialog:pickDir'),
+  setTitleBar: (colors) => ipcRenderer.send('theme:titlebar', colors),
+  onData: (cb) => ipcRenderer.on('pty:data', (e, msg) => cb(msg)),
+  onExit: (cb) => ipcRenderer.on('pty:exit', (e, msg) => cb(msg)),
+  onStatus: (cb) => ipcRenderer.on('status', (e, msg) => cb(msg))
+});
