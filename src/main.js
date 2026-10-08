@@ -122,11 +122,15 @@ function writeHooksSettings() {
   fs.writeFileSync(hooksPath, JSON.stringify(settings, null, 2));
 }
 
+function toRenderer(channel, payload) {
+  if (win && !win.isDestroyed()) {
+    win.webContents.send(channel, payload);
+  }
+}
+
 function setStatus(id, status) {
   statuses.set(id, status);
-  if (win) {
-    win.webContents.send('status', { id, status });
-  }
+  toRenderer('status', { id, status });
 }
 
 function statusFromHook(payload) {
@@ -202,17 +206,11 @@ function openPty(id, cols, rows) {
     saveStore();
   }
   setStatus(id, 'idle');
-  proc.onData((data) => {
-    if (win) {
-      win.webContents.send('pty:data', { id, data });
-    }
-  });
+  proc.onData((data) => toRenderer('pty:data', { id, data }));
   proc.onExit(() => {
     ptys.delete(id);
     setStatus(id, 'stopped');
-    if (win) {
-      win.webContents.send('pty:exit', { id });
-    }
+    toRenderer('pty:exit', { id });
   });
 }
 

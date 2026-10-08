@@ -1,7 +1,7 @@
 {
   "name": "bettercli-for-claude",
   "productName": "BetterCLI for Claude",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Desktop session manager for Claude Code: tabs, groups, and one-click session forks",
   "main": "src/main.js",
   "private": true,
@@ -51,9 +51,26 @@
     },
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64", "arm64"] },
-        { "target": "portable", "arch": ["x64"] },
-        { "target": "zip", "arch": ["x64", "arm64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
       ]
     },
     "nsis": {
@@ -68,14 +85,30 @@
     "mac": {
       "category": "public.app-category.developer-tools",
       "target": [
-        { "target": "dmg", "arch": ["x64", "arm64"] },
-        { "target": "zip", "arch": ["x64", "arm64"] }
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
       ]
     },
     "linux": {
       "category": "Development",
       "maintainer": "lvyyln <lvyyln@users.noreply.github.com>",
-      "target": ["AppImage", "deb", "tar.gz"]
+      "target": [
+        "AppImage",
+        "deb",
+        "tar.gz"
+      ]
     },
     "publish": {
       "provider": "github",
