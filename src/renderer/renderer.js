@@ -463,6 +463,24 @@ function closeTab(id) {
   }
 }
 
+// Uses the physical key, so shortcuts work with any keyboard layout (e.g. Cyrillic Ctrl+C types "с", not "c").
+function physicalKey(e) {
+  const code = e.code || '';
+  if (/^Key[A-Z]$/.test(code)) {
+    return code.substring(3).toLowerCase();
+  }
+  if (/^(Digit|Numpad)[0-9]$/.test(code)) {
+    return code.substring(code.length - 1);
+  }
+  if (code === 'Equal' || code === 'NumpadAdd') {
+    return '=';
+  }
+  if (code === 'Minus' || code === 'NumpadSubtract') {
+    return '-';
+  }
+  return e.key.toLowerCase();
+}
+
 // Windows/Linux put tab actions on Ctrl+Shift (as Windows Terminal does) so plain Ctrl keys still reach Claude.
 function shortcutFor(e) {
   if (e.ctrlKey && !e.altKey && !e.metaKey && e.key === 'Tab') {
@@ -476,7 +494,7 @@ function shortcutFor(e) {
     return null;
   }
   const tabMod = IS_MAC ? !e.shiftKey : e.shiftKey;
-  const key = e.key.toLowerCase();
+  const key = physicalKey(e);
   if (tabMod && key === 't') {
     return 'new';
   }
@@ -489,8 +507,8 @@ function shortcutFor(e) {
   if (e.shiftKey && key === 'g') {
     return 'changes';
   }
-  if (!e.shiftKey && /^[1-9]$/.test(e.key)) {
-    return 'tab' + e.key;
+  if (!e.shiftKey && /^[1-9]$/.test(key)) {
+    return 'tab' + key;
   }
   if (key === '=' || key === '+') {
     return 'zoomIn';
