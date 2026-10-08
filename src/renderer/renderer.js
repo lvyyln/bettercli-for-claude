@@ -6,8 +6,13 @@ const state = {
   collapsed: new Set(['__history']),
   open: [],
   active: null,
-  theme: 'midnight'
+  theme: 'midnight',
+  fontSize: 13
 };
+const IS_MAC = desk.platform === 'darwin';
+const FONT_MIN = 9;
+const FONT_MAX = 24;
+const FONT_DEFAULT = 13;
 const terms = new Map();
 let modal = { mode: 'new', id: null };
 
@@ -264,7 +269,7 @@ function createTerminal(id) {
   $('terminals').appendChild(el);
   const term = new Terminal({
     fontFamily: "'Cascadia Mono', Consolas, monospace",
-    fontSize: 13,
+    fontSize: state.fontSize,
     lineHeight: 1.15,
     scrollback: 10000,
     cursorBlink: true,
@@ -277,14 +282,6 @@ function createTerminal(id) {
   term.attachCustomKeyEventHandler((e) => {
     if (e.type !== 'keydown') {
       return true;
-    }
-    if (e.ctrlKey && e.key === 'c' && term.hasSelection()) {
-      navigator.clipboard.writeText(term.getSelection());
-      term.clearSelection();
-      return false;
-    }
-    if (e.ctrlKey && (e.key === 'v' || e.key === 't')) {
-      return false;
     }
     if (e.shiftKey && e.key === 'Enter') {
       desk.write(id, '\x1b\r');
@@ -312,6 +309,7 @@ async function openSession(id) {
     state.open.push(id);
   }
   state.active = id;
+  desk.setActive(id);
   for (const [otherId, other] of terms) {
     other.el.classList.toggle('active', otherId === id);
   }
@@ -336,8 +334,103 @@ function closeTab(id) {
   if (state.active) {
     openSession(state.active);
   } else {
+    desk.setActive(null);
     render();
   }
+}
+
+// Windows/Linux put tab actions on Ctrl+Shift (as Windows Terminal does) so plain Ctrl keys still reach Claude.
+function shortcutFor(e) {
+  if (e.ctrlKey && !e.altKey && !e.metaKey && e.key === 'Tab') {
+    return e.shiftKey ? 'prev' : 'next';
+  }
+  const mod = IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+  if (!mod || e.altKey) {
+    return null;
+  }
+  const tabMod = IS_MAC ? !e.shiftKey : e.shiftKey;
+  const key = e.key.toLowerCase();
+  if (tabMod && key === 't') {
+    return 'new';
+  }
+  if (tabMod && key === 'w') {
+    return 'close';
+  }
+  if (tabMod && key === 'd') {
+    return 'fork';
+  }
+  if (!e.shiftKey && /^[1-9]$/.test(e.key)) {
+    return 'tab' + e.key;
+  }
+  if (key === '=' || key === '+') {
+    return 'zoomIn';
+  }
+  if (key === '-' || key === '_') {
+    return 'zoomOut';
+  }
+  if (!e.shiftKey && key === '0') {
+    return 'zoomReset';
+  }
+  if (key === 'v') {
+    return 'paste';
+  }
+  const entry = terms.get(state.active);
+  if (key === 'c' && entry && entry.term.hasSelection()) {
+    return 'copy';
+  }
+  return null;
+}
+
+function runShortcut(action) {
+  const index = state.open.indexOf(state.active);
+  if (action === 'new') {
+    openModal('new');
+  } else if (action === 'close' && state.active) {
+    closeTab(state.active);
+  } else if (action === 'fork' && state.active) {
+    forkSession(state.active);
+  } else if ((action === 'next' || action === 'prev') && state.open.length > 1) {
+    const step = action === 'next' ? 1 : -1;
+    openSession(state.open[(index + step + state.open.length) % state.open.length]);
+  } else if (action.startsWith('tab') && state.open.length) {
+    const n = Number(action.substring(3));
+    openSession(n === 9 ? state.open[state.open.length - 1] : state.open[n - 1] || state.active);
+  } else if (action === 'zoomIn') {
+    setFontSize(state.fontSize + 1);
+  } else if (action === 'zoomOut') {
+    setFontSize(state.fontSize - 1);
+  } else if (action === 'zoomReset') {
+    setFontSize(FONT_DEFAULT);
+  } else if (action === 'paste') {
+    pasteClipboard();
+  } else if (action === 'copy') {
+    const term = terms.get(state.active).term;
+    navigator.clipboard.writeText(term.getSelection());
+    term.clearSelection();
+  }
+}
+
+function setFontSize(size) {
+  state.fontSize = Math.min(FONT_MAX, Math.max(FONT_MIN, size));
+  for (const entry of terms.values()) {
+    entry.term.options.fontSize = state.fontSize;
+  }
+  writeSetting('fontSize', String(state.fontSize));
+  fitActive();
+}
+
+async function pasteClipboard() {
+  const entry = terms.get(state.active);
+  if (!entry) {
+    return;
+  }
+  const content = await desk.readPaste();
+  if (content.imagePath) {
+    entry.term.paste(content.imagePath + ' ');
+  } else if (content.text) {
+    entry.term.paste(content.text);
+  }
+  entry.term.focus();
 }
 
 async function forkSession(parentId) {
@@ -415,12 +508,20 @@ function wireUi() {
   $('modal-form').addEventListener('submit', () => submitModal());
   $('theme').innerHTML = Object.entries(THEMES).map(([key, t]) => `<option value="${key}">${esc(t.label)}</option>`).join('');
   $('theme').addEventListener('change', (e) => applyTheme(e.target.value));
-  document.addEventListener('keydown', (e) => {
-    if (e.ctrlKey && e.key === 't' && !$('modal').open) {
-      e.preventDefault();
-      openModal('new');
+  // Capture phase, so shortcuts are handled before xterm sends the keys to Claude.
+  window.addEventListener('keydown', (e) => {
+    if ($('modal').open) {
+      return;
     }
-  });
+    const action = shortcutFor(e);
+    if (!action) {
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    runShortcut(action);
+  }, true);
+  $('btn-new').title = IS_MAC ? 'New session (⌘T)' : 'New session (Ctrl+Shift+T)';
   new ResizeObserver(() => fitActive()).observe($('terminals'));
 }
 
@@ -437,6 +538,7 @@ function wireDesk() {
       entry.term.write('\r\n\x1b[90m[session ended: click the tab or session to resume]\x1b[0m\r\n');
     }
   });
+  desk.onFocusSession(({ id }) => openSession(id));
   desk.onStatus(({ id, status }) => {
     state.statuses[id] = status;
     render();
@@ -448,6 +550,7 @@ async function init() {
   wireUi();
   wireDesk();
   applyTheme(readSetting('theme', 'midnight'));
+  state.fontSize = Number(readSetting('fontSize', String(FONT_DEFAULT))) || FONT_DEFAULT;
   const loaded = await desk.getState();
   state.sessions = loaded.sessions;
   state.statuses = loaded.statuses;

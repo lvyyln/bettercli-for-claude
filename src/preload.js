@@ -15,6 +15,9 @@ contextBridge.exposeInMainWorld('desk', {
   resize: (id, cols, rows) => ipcRenderer.send('pty:resize', { id, cols, rows }),
   pickDir: () => ipcRenderer.invoke('dialog:pickDir'),
   setTitleBar: (colors) => ipcRenderer.send('theme:titlebar', colors),
+  setActive: (id) => ipcRenderer.send('session:active', id),
+  readPaste: () => ipcRenderer.invoke('clipboard:paste'),
+  onFocusSession: (cb) => ipcRenderer.on('session:focus', (e, msg) => cb(msg)),
   onData: (cb) => ipcRenderer.on('pty:data', (e, msg) => cb(msg)),
   onExit: (cb) => ipcRenderer.on('pty:exit', (e, msg) => cb(msg)),
   onStatus: (cb) => ipcRenderer.on('status', (e, msg) => cb(msg))

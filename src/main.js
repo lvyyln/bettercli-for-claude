@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Notification, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -33,6 +33,9 @@ let hookPort = 0;
 let store = { sessions: [] };
 const ptys = new Map();
 const statuses = new Map();
+// Held until clicked or dismissed so the click handler is not garbage-collected.
+const notifications = new Set();
+let activeId = null;
 
 function loadStore() {
   storePath = path.join(app.getPath('userData'), 'desk.json');
@@ -129,8 +132,61 @@ function toRenderer(channel, payload) {
 }
 
 function setStatus(id, status) {
+  const previous = statuses.get(id);
   statuses.set(id, status);
   toRenderer('status', { id, status });
+  notifyStatus(id, previous, status);
+}
+
+function windowAlive() {
+  return win && !win.isDestroyed();
+}
+
+// Tells the user when a session they are not looking at needs input or has finished its turn.
+function notifyStatus(id, previous, status) {
+  const needsInput = status === 'waiting' && previous !== 'waiting';
+  const finished = status === 'idle' && previous === 'busy';
+  if (!needsInput && !finished) {
+    return;
+  }
+  if (windowAlive() && win.isFocused() && id === activeId) {
+    return;
+  }
+  const session = findSession(id);
+  if (!session || !Notification.isSupported()) {
+    return;
+  }
+  const notification = new Notification({ title: session.title, body: needsInput ? 'Needs your input' : 'Finished' });
+  notifications.add(notification);
+  notification.on('click', () => {
+    notifications.delete(notification);
+    if (windowAlive()) {
+      if (win.isMinimized()) {
+        win.restore();
+      }
+      win.show();
+      win.focus();
+      toRenderer('session:focus', { id });
+    }
+  });
+  notification.on('close', () => notifications.delete(notification));
+  notification.show();
+  if (windowAlive() && !win.isFocused()) {
+    win.flashFrame(true);
+  }
+}
+
+// Images are saved to a temp file and pasted as a path; Claude Code attaches pasted image paths.
+async function readClipboardForPaste() {
+  for (const item of await clipboard.read()) {
+    if (item.types.includes('image/png')) {
+      const blob = await item.getType('image/png');
+      const file = path.join(os.tmpdir(), `bettercli-paste-${Date.now()}.png`);
+      fs.writeFileSync(file, Buffer.from(await blob.arrayBuffer()));
+      return { imagePath: file };
+    }
+  }
+  return { text: await clipboard.readText() };
 }
 
 function statusFromHook(payload) {
@@ -356,11 +412,16 @@ function registerIpc() {
     }
     win.setBackgroundColor(color);
   });
+  ipcMain.on('session:active', (e, id) => { activeId = id; });
+  ipcMain.handle('clipboard:paste', () => readClipboardForPaste());
   ipcMain.handle('dialog:pickDir', async () => {
     const result = await dialog.showOpenDialog(win, { properties: ['openDirectory'] });
     return result.canceled ? null : result.filePaths[0];
   });
 }
+
+// Windows shows this id as the notification source; it must match build.appId.
+app.setAppUserModelId('io.github.lvyyln.bettercli');
 
 app.whenReady().then(async () => {
   loadShellPath();
@@ -384,6 +445,7 @@ app.whenReady().then(async () => {
       nodeIntegration: false
     }
   }, frame));
+  win.on('focus', () => win.flashFrame(false));
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 });
 

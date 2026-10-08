@@ -12,6 +12,8 @@ Every tab is the real `claude` terminal UI, so slash commands, skills, MCP serve
 - **Session tree**: group sessions by task; forks appear as children of their parent.
 - **Fork**: start a new session that carries the full history of an existing one. The parent is not touched.
 - **Live status**: each session shows whether Claude is working, waiting for you (permission prompt), or idle.
+- **Notifications**: a desktop notification (and a flashing taskbar icon) when a session you are not looking at needs input or finishes. Click it to jump to that tab.
+- **Image paste**: Ctrl+V (⌘V on macOS) with a screenshot in the clipboard attaches it to the prompt.
 - **Your existing sessions**: the "Claude CLI sessions" section lists sessions you ran in a normal terminal; click one to bring it in and continue it.
 - **Themes**: Midnight, Nord, Dracula, Solarized Dark, Daylight. The terminal and window title bar follow the theme.
 
@@ -39,12 +41,27 @@ Download from the [latest release](https://github.com/lvyyln/bettercli-for-claud
 
 ## Usage
 
-- **New session**: `+` in the sidebar or Ctrl+T. Pick a title, a group and a working directory.
+- **New session**: `+` in the sidebar. Pick a title, a group and a working directory.
 - **Fork**: hover a session and click the fork icon, or use *Fork* in the header.
 - **Edit**: rename, move to another group, or remove from the sidebar. Removing never deletes the conversation from `~/.claude/projects`.
 - Closing a tab stops that Claude process. Click the session again to resume it.
-- Keys: Ctrl+C copies when text is selected, Ctrl+V pastes, Shift+Enter inserts a newline.
 - With the Daylight theme, also run `/theme` inside Claude and choose a light theme, since Claude draws its own colors.
+
+### Keyboard shortcuts
+
+Tab actions use Ctrl+Shift on Windows and Linux (like Windows Terminal), so plain Ctrl shortcuts such as Ctrl+T and Ctrl+W still reach Claude.
+
+| Action | Windows / Linux | macOS |
+|---|---|---|
+| New session | Ctrl+Shift+T | ⌘T |
+| Close tab | Ctrl+Shift+W | ⌘W |
+| Fork current session | Ctrl+Shift+D | ⌘D |
+| Next / previous tab | Ctrl+Tab / Ctrl+Shift+Tab | Ctrl+Tab / Ctrl+Shift+Tab |
+| Go to tab 1–8 / last tab | Ctrl+1…8 / Ctrl+9 | ⌘1…8 / ⌘9 |
+| Font size bigger / smaller / reset | Ctrl+= / Ctrl+- / Ctrl+0 | ⌘= / ⌘- / ⌘0 |
+| Paste text or image | Ctrl+V or Ctrl+Shift+V | ⌘V |
+| Copy selection | Ctrl+C (with text selected) | ⌘C |
+| New line in the prompt | Shift+Enter | Shift+Enter |
 
 ## How it works
 
