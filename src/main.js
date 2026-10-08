@@ -40,7 +40,7 @@ let activeId = null;
 
 function loadStore() {
   storePath = path.join(app.getPath('userData'), 'desk.json');
-  if (!fs.existsSync(storePath) && fs.existsSync(LEGACY_STORE)) {
+  if (app.isPackaged && !fs.existsSync(storePath) && fs.existsSync(LEGACY_STORE)) {
     fs.mkdirSync(path.dirname(storePath), { recursive: true });
     fs.copyFileSync(LEGACY_STORE, storePath);
   }
@@ -436,7 +436,30 @@ function registerIpc() {
 // Windows shows this id as the notification source; it must match build.appId.
 app.setAppUserModelId('io.github.lvyyln.bettercli');
 
+// `npm start` gets its own data folder so development never touches the installed app's sessions or hooks.
+if (!app.isPackaged) {
+  app.setPath('userData', path.join(app.getPath('appData'), 'BetterCLI for Claude (dev)'));
+}
+
+// A second copy would rewrite the shared hooks.json with its own port and cut every running session off from status updates.
+const isFirstInstance = app.requestSingleInstanceLock();
+if (!isFirstInstance) {
+  app.quit();
+}
+app.on('second-instance', () => {
+  if (windowAlive()) {
+    if (win.isMinimized()) {
+      win.restore();
+    }
+    win.show();
+    win.focus();
+  }
+});
+
 app.whenReady().then(async () => {
+  if (!isFirstInstance) {
+    return;
+  }
   loadShellPath();
   loadStore();
   changes.init(app.getPath('userData'));
