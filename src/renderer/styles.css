@@ -95,6 +95,8 @@ button, input, select { font: inherit; color: inherit; }
 .section-head .label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .section-head .count { font-weight: 400; letter-spacing: 0; color: var(--faint); }
 .section-head .icon-btn { width: 22px; height: 22px; }
+.section-head .add { visibility: hidden; }
+.section-head:hover .add { visibility: visible; }
 
 .item {
   display: flex;

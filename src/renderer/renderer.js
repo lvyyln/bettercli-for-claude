@@ -27,6 +27,7 @@ const ICONS = {
   fork: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="6" cy="5" r="2"></circle><circle cx="18" cy="5" r="2"></circle><circle cx="12" cy="19" r="2"></circle><path d="M6 7v2a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V7M12 12v5"></path></svg>',
   edit: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 20h4L19 9l-4-4L4 16z"></path></svg>',
   close: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"></path></svg>',
+  plus: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>',
   refresh: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"></path></svg>'
 };
 
@@ -116,6 +117,10 @@ function sectionHead(key, label, count, extraHtml) {
       loadHistory();
       return;
     }
+    if (e.target.closest('[data-act="add"]')) {
+      openModal('new', null, key);
+      return;
+    }
     toggleSection(key);
   });
   return head;
@@ -193,9 +198,10 @@ function historyRow(h) {
 function renderTree() {
   const tree = $('tree');
   tree.innerHTML = '';
+  const add = `<span class="icon-btn add" data-act="add" title="New session in this group" aria-label="New session in this group">${ICONS.plus}</span>`;
   for (const group of groupNames()) {
     const rows = flattenGroup(group);
-    tree.appendChild(sectionHead(group, group, rows.length));
+    tree.appendChild(sectionHead(group, group, rows.length, add));
     if (!state.collapsed.has(group)) {
       for (const row of rows) {
         tree.appendChild(sessionRow(row.session, row.depth));
@@ -439,12 +445,14 @@ async function forkSession(parentId) {
   openSession(session.id);
 }
 
-function openModal(mode, id) {
+// For a new session in a given group, defaults come from that group's most recent session.
+function openModal(mode, id, group) {
   modal = { mode, id };
-  const s = id ? find(id) : find(state.active);
+  const inGroup = group ? state.sessions.filter((x) => x.group === group) : [];
+  const s = id ? find(id) : inGroup[inGroup.length - 1] || find(state.active);
   $('modal-title').textContent = mode === 'new' ? 'New session' : 'Edit session';
   $('f-title').value = mode === 'new' ? '' : s.title;
-  $('f-group').value = s ? s.group : 'Scratch';
+  $('f-group').value = group || (s ? s.group : 'Scratch');
   $('f-cwd').value = s ? s.cwd : '';
   $('f-cwd').required = mode === 'new';
   $('cwd-row').classList.toggle('hidden', mode !== 'new');
