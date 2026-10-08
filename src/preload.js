@@ -18,6 +18,10 @@ contextBridge.exposeInMainWorld('desk', {
   setActive: (id) => ipcRenderer.send('session:active', id),
   readPaste: () => ipcRenderer.invoke('clipboard:paste'),
   onFocusSession: (cb) => ipcRenderer.on('session:focus', (e, msg) => cb(msg)),
+  listChanges: (id) => ipcRenderer.invoke('changes:list', id),
+  diffChange: (id, file) => ipcRenderer.invoke('changes:diff', { id, file }),
+  openFile: (file) => ipcRenderer.invoke('changes:open', file),
+  onChanges: (cb) => ipcRenderer.on('changes:updated', (e, msg) => cb(msg)),
   onData: (cb) => ipcRenderer.on('pty:data', (e, msg) => cb(msg)),
   onExit: (cb) => ipcRenderer.on('pty:exit', (e, msg) => cb(msg)),
   onStatus: (cb) => ipcRenderer.on('status', (e, msg) => cb(msg))

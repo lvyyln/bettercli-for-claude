@@ -13,6 +13,7 @@ Every tab is the real `claude` terminal UI, so slash commands, skills, MCP serve
 - **Fork**: start a new session that carries the full history of an existing one. The parent is not touched.
 - **Live status**: each session shows whether Claude is working, waiting for you (permission prompt), or idle.
 - **Notifications**: a desktop notification (and a flashing taskbar icon) when a session you are not looking at needs input or finishes. Click it to jump to that tab.
+- **Changed files**: a side panel lists every file the session edited, with a diff against how the file looked before the session first touched it. Step through files with F8 / Shift+F8. Tracks Claude's Edit and Write tools; files changed by shell commands are not listed.
 - **Image paste**: Ctrl+V (⌘V on macOS) with a screenshot in the clipboard attaches it to the prompt.
 - **Your existing sessions**: the "Claude CLI sessions" section lists sessions you ran in a normal terminal; click one to bring it in and continue it.
 - **Themes**: Midnight, Nord, Dracula, Solarized Dark, Daylight. The terminal and window title bar follow the theme.
@@ -56,6 +57,8 @@ Tab actions use Ctrl+Shift on Windows and Linux (like Windows Terminal), so plai
 | New session | Ctrl+Shift+T | ⌘T |
 | Close tab | Ctrl+Shift+W | ⌘W |
 | Fork current session | Ctrl+Shift+D | ⌘D |
+| Show / hide changed files | Ctrl+Shift+G | ⌘⇧G |
+| Next / previous changed file | F8 / Shift+F8 | F8 / Shift+F8 |
 | Next / previous tab | Ctrl+Tab / Ctrl+Shift+Tab | Ctrl+Tab / Ctrl+Shift+Tab |
 | Go to tab 1–8 / last tab | Ctrl+1…8 / Ctrl+9 | ⌘1…8 / ⌘9 |
 | Font size bigger / smaller / reset | Ctrl+= / Ctrl+- / Ctrl+0 | ⌘= / ⌘- / ⌘0 |

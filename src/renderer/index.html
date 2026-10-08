@@ -34,6 +34,10 @@
         <div id="title" class="title"></div>
       </div>
       <div class="header-actions">
+        <button id="btn-changes" class="btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><path d="M14 3v6h6M12 12v6M9 15h6"></path></svg>
+          Changes <span id="changes-badge" class="badge hidden"></span>
+        </button>
         <button id="btn-fork" class="btn primary">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="6" cy="5" r="2"></circle><circle cx="18" cy="5" r="2"></circle><circle cx="12" cy="19" r="2"></circle><path d="M6 7v2a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V7M12 12v5"></path></svg>
           Fork
@@ -44,12 +48,31 @@
         </button>
       </div>
     </div>
-    <div id="terminals" class="terminals">
-      <div id="empty" class="empty">
-        <div class="empty-title">No session open</div>
-        <div class="empty-text">Pick a session on the left, or start a new one.</div>
-        <button id="btn-new-empty" class="btn primary">New session</button>
+    <div class="work">
+      <div id="terminals" class="terminals">
+        <div id="empty" class="empty">
+          <div class="empty-title">No session open</div>
+          <div class="empty-text">Pick a session on the left, or start a new one.</div>
+          <button id="btn-new-empty" class="btn primary">New session</button>
+        </div>
       </div>
+      <aside id="changes" class="changes hidden" aria-label="Changed files">
+        <div class="changes-head">
+          <span class="changes-title">Changed files</span>
+          <span id="changes-count" class="count"></span>
+          <span class="spacer"></span>
+          <button id="btn-changes-refresh" class="icon-btn" title="Refresh" aria-label="Refresh"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"></path></svg></button>
+          <button id="btn-changes-close" class="icon-btn" title="Close" aria-label="Close"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
+        </div>
+        <div id="changes-files" class="changes-files"></div>
+        <div id="diff-head" class="diff-head hidden">
+          <span id="diff-path" class="diff-path"></span>
+          <button id="btn-diff-prev" class="icon-btn" title="Previous file (Shift+F8)" aria-label="Previous file"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 15l-6-6-6 6"></path></svg></button>
+          <button id="btn-diff-next" class="icon-btn" title="Next file (F8)" aria-label="Next file"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"></path></svg></button>
+          <button id="btn-diff-open" class="btn small">Open</button>
+        </div>
+        <div id="diff" class="diff"></div>
+      </aside>
     </div>
     <div id="statusbar" class="statusbar"></div>
   </main>

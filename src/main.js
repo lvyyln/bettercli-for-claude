@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, Notification, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Notification, clipboard, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -6,6 +6,7 @@ const http = require('http');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const pty = require('node-pty');
+const changes = require('./changes');
 
 const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 // Set by a parent Claude Code session when the app is launched from one; inheriting them disables transcript saving.
@@ -210,15 +211,23 @@ function startHookServer() {
       let body = '';
       req.on('data', (chunk) => { body += chunk; });
       req.on('end', () => {
-        res.end('ok');
         try {
           const payload = JSON.parse(body);
-          if (payload.session_id && ptys.has(payload.session_id)) {
-            setStatus(payload.session_id, statusFromHook(payload));
+          const id = payload.session_id;
+          if (id && ptys.has(id)) {
+            // Answered only after the baseline is saved: Claude waits for the hook, so the file is still untouched.
+            if (payload.hook_event_name === 'PreToolUse' && changes.isEditTool(payload)) {
+              changes.trackBeforeEdit(id, payload);
+            }
+            setStatus(id, statusFromHook(payload));
+            if (payload.hook_event_name === 'PostToolUse' && changes.isEditTool(payload)) {
+              toRenderer('changes:updated', { id });
+            }
           }
         } catch (e) {
           console.error('bad hook payload', e);
         }
+        res.end('ok');
       });
     });
     server.listen(0, '127.0.0.1', () => {
@@ -391,7 +400,11 @@ function registerIpc() {
     }
     store.sessions = store.sessions.filter((s) => s.id !== id);
     saveStore();
+    changes.remove(id);
   });
+  ipcMain.handle('changes:list', (e, id) => changes.list(id, findSession(id).cwd));
+  ipcMain.handle('changes:diff', (e, { id, file }) => changes.diffFile(id, findSession(id).cwd, file));
+  ipcMain.handle('changes:open', (e, file) => shell.openPath(file));
   ipcMain.handle('pty:open', (e, { id, cols, rows }) => openPty(id, cols, rows));
   ipcMain.handle('pty:kill', (e, id) => killPty(id));
   ipcMain.on('pty:write', (e, { id, data }) => {
@@ -426,6 +439,7 @@ app.setAppUserModelId('io.github.lvyyln.bettercli');
 app.whenReady().then(async () => {
   loadShellPath();
   loadStore();
+  changes.init(app.getPath('userData'));
   await startHookServer();
   writeHooksSettings();
   registerIpc();

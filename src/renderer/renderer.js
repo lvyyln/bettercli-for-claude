@@ -7,7 +7,10 @@ const state = {
   open: [],
   active: null,
   theme: 'midnight',
-  fontSize: 13
+  fontSize: 13,
+  changesOpen: false,
+  changes: [],
+  selectedChange: null
 };
 const IS_MAC = desk.platform === 'darwin';
 const FONT_MIN = 9;
@@ -261,6 +264,119 @@ function render() {
   renderTree();
   renderTabs();
   renderHeader();
+  renderChanges();
+}
+
+const CHANGE_LETTER = { added: 'A', modified: 'M', deleted: 'D' };
+
+function renderChanges() {
+  const count = state.changes.length;
+  $('changes-badge').textContent = count;
+  $('changes-badge').classList.toggle('hidden', count === 0);
+  $('btn-changes').classList.toggle('on', state.changesOpen);
+  $('changes').classList.toggle('hidden', !state.changesOpen || !state.active);
+  $('changes-count').textContent = count || '';
+  const files = $('changes-files');
+  files.innerHTML = '';
+  if (count === 0) {
+    files.innerHTML = '<div class="changes-empty">No edits yet. Files Claude changes with its Edit and Write tools show up here.</div>';
+  }
+  for (const c of state.changes) {
+    const parts = c.rel.split(/[\\/]/);
+    const name = parts.pop();
+    const row = document.createElement('div');
+    row.className = 'cf-row' + (c.path === state.selectedChange ? ' selected' : '');
+    row.title = c.path;
+    row.innerHTML =
+      `<span class="cf-status ${c.status}">${CHANGE_LETTER[c.status]}</span>` +
+      `<span class="cf-path">${esc(name)}<span class="dir">${esc(parts.join('/'))}</span></span>` +
+      `<span class="cf-stat"><span class="plus">+${c.added}</span> <span class="minus">−${c.removed}</span></span>`;
+    row.addEventListener('click', () => selectChange(c.path));
+    files.appendChild(row);
+  }
+  $('diff-head').classList.toggle('hidden', !state.selectedChange);
+}
+
+async function refreshChanges() {
+  const id = state.active;
+  const list = id ? await desk.listChanges(id) : [];
+  if (id !== state.active) {
+    return;
+  }
+  state.changes = list;
+  if (!list.some((c) => c.path === state.selectedChange)) {
+    state.selectedChange = list.length ? list[0].path : null;
+  }
+  renderChanges();
+  await showDiff();
+}
+
+function selectChange(file) {
+  state.selectedChange = file;
+  renderChanges();
+  const row = $('changes-files').querySelector('.cf-row.selected');
+  if (row) {
+    row.scrollIntoView({ block: 'nearest' });
+  }
+  showDiff();
+}
+
+function stepChange(step) {
+  const count = state.changes.length;
+  if (!count) {
+    return;
+  }
+  const index = state.changes.findIndex((c) => c.path === state.selectedChange);
+  selectChange(state.changes[(index + step + count) % count].path);
+}
+
+function diffHtml(d) {
+  if (d.note) {
+    return `<div class="diff-note">${esc(d.note)}</div>`;
+  }
+  const row = (cls, oldNo, newNo, text) =>
+    `<div class="dl ${cls}"><span class="ln">${oldNo}</span><span class="ln">${newNo}</span><span class="tx">${text}</span></div>`;
+  let html = '';
+  for (const hunk of d.hunks) {
+    html += `<div class="hunk">@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@</div>`;
+    let oldNo = hunk.oldStart;
+    let newNo = hunk.newStart;
+    for (const line of hunk.lines) {
+      const sign = line[0];
+      const text = esc(line);
+      if (sign === '+') {
+        html += row('add', '', newNo++, text);
+      } else if (sign === '-') {
+        html += row('del', oldNo++, '', text);
+      } else if (sign === ' ') {
+        html += row('ctx', oldNo++, newNo++, text);
+      }
+    }
+  }
+  return html;
+}
+
+async function showDiff() {
+  const id = state.active;
+  const file = state.selectedChange;
+  if (!id || !file || !state.changesOpen) {
+    $('diff').innerHTML = '';
+    return;
+  }
+  const d = await desk.diffChange(id, file);
+  if (id !== state.active || file !== state.selectedChange) {
+    return;
+  }
+  $('diff-path').textContent = d.rel;
+  $('diff-path').title = d.path;
+  $('diff').innerHTML = diffHtml(d);
+}
+
+function toggleChanges() {
+  state.changesOpen = !state.changesOpen;
+  writeSetting('changesOpen', state.changesOpen ? '1' : '0');
+  renderChanges();
+  refreshChanges();
 }
 
 async function loadHistory() {
@@ -322,6 +438,7 @@ async function openSession(id) {
   render();
   fitActive();
   entry.term.focus();
+  refreshChanges();
   await desk.openPty(id, entry.term.cols, entry.term.rows);
 }
 
@@ -341,6 +458,7 @@ function closeTab(id) {
     openSession(state.active);
   } else {
     desk.setActive(null);
+    refreshChanges();
     render();
   }
 }
@@ -349,6 +467,9 @@ function closeTab(id) {
 function shortcutFor(e) {
   if (e.ctrlKey && !e.altKey && !e.metaKey && e.key === 'Tab') {
     return e.shiftKey ? 'prev' : 'next';
+  }
+  if (e.key === 'F8' && state.changesOpen && !e.ctrlKey && !e.altKey && !e.metaKey) {
+    return e.shiftKey ? 'prevChange' : 'nextChange';
   }
   const mod = IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
   if (!mod || e.altKey) {
@@ -364,6 +485,9 @@ function shortcutFor(e) {
   }
   if (tabMod && key === 'd') {
     return 'fork';
+  }
+  if (e.shiftKey && key === 'g') {
+    return 'changes';
   }
   if (!e.shiftKey && /^[1-9]$/.test(e.key)) {
     return 'tab' + e.key;
@@ -401,6 +525,12 @@ function runShortcut(action) {
   } else if (action.startsWith('tab') && state.open.length) {
     const n = Number(action.substring(3));
     openSession(n === 9 ? state.open[state.open.length - 1] : state.open[n - 1] || state.active);
+  } else if (action === 'changes') {
+    toggleChanges();
+  } else if (action === 'nextChange') {
+    stepChange(1);
+  } else if (action === 'prevChange') {
+    stepChange(-1);
   } else if (action === 'zoomIn') {
     setFontSize(state.fontSize + 1);
   } else if (action === 'zoomOut') {
@@ -502,6 +632,17 @@ function wireUi() {
   $('btn-new-empty').addEventListener('click', () => openModal('new'));
   $('btn-fork').addEventListener('click', () => forkSession(state.active));
   $('btn-edit').addEventListener('click', () => openModal('edit', state.active));
+  $('btn-changes').addEventListener('click', () => toggleChanges());
+  $('btn-changes').title = IS_MAC ? 'Changed files (⌘⇧G)' : 'Changed files (Ctrl+Shift+G)';
+  $('btn-changes-close').addEventListener('click', () => toggleChanges());
+  $('btn-changes-refresh').addEventListener('click', () => refreshChanges());
+  $('btn-diff-prev').addEventListener('click', () => stepChange(-1));
+  $('btn-diff-next').addEventListener('click', () => stepChange(1));
+  $('btn-diff-open').addEventListener('click', () => {
+    if (state.selectedChange) {
+      desk.openFile(state.selectedChange);
+    }
+  });
   $('btn-cancel').addEventListener('click', () => $('modal').close());
   $('btn-browse').addEventListener('click', async () => {
     const dir = await desk.pickDir();
@@ -547,6 +688,11 @@ function wireDesk() {
     }
   });
   desk.onFocusSession(({ id }) => openSession(id));
+  desk.onChanges(({ id }) => {
+    if (id === state.active) {
+      refreshChanges();
+    }
+  });
   desk.onStatus(({ id, status }) => {
     state.statuses[id] = status;
     render();
@@ -559,6 +705,7 @@ async function init() {
   wireDesk();
   applyTheme(readSetting('theme', 'midnight'));
   state.fontSize = Number(readSetting('fontSize', String(FONT_DEFAULT))) || FONT_DEFAULT;
+  state.changesOpen = readSetting('changesOpen', '0') === '1';
   const loaded = await desk.getState();
   state.sessions = loaded.sessions;
   state.statuses = loaded.statuses;
