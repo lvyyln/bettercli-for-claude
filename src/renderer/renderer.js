@@ -395,10 +395,12 @@ function createTerminal(id) {
     lineHeight: 1.15,
     scrollback: 10000,
     cursorBlink: true,
-    theme: THEMES[state.theme].term
+    theme: THEMES[state.theme].term,
+    linkHandler: { activate: (e, uri) => openLink(e, uri) }
   });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
+  term.loadAddon(new WebLinksAddon.WebLinksAddon((e, uri) => openLink(e, uri)));
   term.open(el);
   term.onData((data) => desk.write(id, data));
   term.attachCustomKeyEventHandler((e) => {
@@ -414,6 +416,13 @@ function createTerminal(id) {
   const entry = { term, fit, el };
   terms.set(id, entry);
   return entry;
+}
+
+// Ctrl+click (Cmd+click on macOS), like Windows Terminal and VS Code, so a plain click still selects text.
+function openLink(e, uri) {
+  if (IS_MAC ? e.metaKey : e.ctrlKey) {
+    desk.openLink(uri);
+  }
 }
 
 function fitActive() {

@@ -177,6 +177,18 @@ function notifyStatus(id, previous, status) {
   }
 }
 
+// Terminal output is untrusted, so only web and mail links are handed to the OS.
+function openExternalLink(url) {
+  try {
+    const protocol = new URL(url).protocol;
+    if (protocol === 'http:' || protocol === 'https:' || protocol === 'mailto:') {
+      shell.openExternal(url);
+    }
+  } catch (e) {
+    console.error('not a valid link', url);
+  }
+}
+
 // Images are saved to a temp file and pasted as a path; Claude Code attaches pasted image paths.
 async function readClipboardForPaste() {
   for (const item of await clipboard.read()) {
@@ -426,6 +438,7 @@ function registerIpc() {
     win.setBackgroundColor(color);
   });
   ipcMain.on('session:active', (e, id) => { activeId = id; });
+  ipcMain.on('link:open', (e, url) => openExternalLink(url));
   ipcMain.handle('clipboard:paste', () => readClipboardForPaste());
   ipcMain.handle('dialog:pickDir', async () => {
     const result = await dialog.showOpenDialog(win, { properties: ['openDirectory'] });
@@ -483,6 +496,10 @@ app.whenReady().then(async () => {
     }
   }, frame));
   win.on('focus', () => win.flashFrame(false));
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    openExternalLink(url);
+    return { action: 'deny' };
+  });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 });
 

@@ -64,6 +64,7 @@ Tab actions use Ctrl+Shift on Windows and Linux (like Windows Terminal), so plai
 | Font size bigger / smaller / reset | Ctrl+= / Ctrl+- / Ctrl+0 | ⌘= / ⌘- / ⌘0 |
 | Paste text or image | Ctrl+V or Ctrl+Shift+V | ⌘V |
 | Copy selection | Ctrl+C (with text selected) | ⌘C |
+| Open a link in the browser | Ctrl+click | ⌘+click |
 | New line in the prompt | Shift+Enter | Shift+Enter |
 
 ## How it works
