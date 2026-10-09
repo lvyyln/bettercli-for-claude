@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('desk', {
   setActive: (id) => ipcRenderer.send('session:active', id),
   readPaste: () => ipcRenderer.invoke('clipboard:paste'),
   openLink: (url) => ipcRenderer.send('link:open', url),
+  logError: (message) => ipcRenderer.send('log:error', message),
   onFocusSession: (cb) => ipcRenderer.on('session:focus', (e, msg) => cb(msg)),
   listChanges: (id) => ipcRenderer.invoke('changes:list', id),
   diffChange: (id, file) => ipcRenderer.invoke('changes:diff', { id, file }),

@@ -739,4 +739,7 @@ async function init() {
   render();
 }
 
+window.addEventListener('error', (e) => desk.logError((e.error && e.error.stack) || e.message));
+window.addEventListener('unhandledrejection', (e) => desk.logError((e.reason && e.reason.stack) || String(e.reason)));
+
 init();

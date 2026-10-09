@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, Notification, clipboard, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Notification, clipboard, shell, crashReporter } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const pty = require('node-pty');
 const changes = require('./changes');
+const log = require('./log');
 
 const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 // Set by a parent Claude Code session when the app is launched from one; inheriting them disables transcript saving.
@@ -69,7 +70,7 @@ function loadShellPath() {
       process.env.PATH = shellPath;
     }
   } catch (e) {
-    console.error('could not read login shell PATH', e.message);
+    log.error('could not read login shell PATH', e.message);
   }
 }
 
@@ -185,7 +186,7 @@ function openExternalLink(url) {
       shell.openExternal(url);
     }
   } catch (e) {
-    console.error('not a valid link', url);
+    log.error('not a valid link', url);
   }
 }
 
@@ -237,7 +238,7 @@ function startHookServer() {
             }
           }
         } catch (e) {
-          console.error('bad hook payload', e);
+          log.error('bad hook payload', e);
         }
         res.end('ok');
       });
@@ -284,7 +285,8 @@ function openPty(id, cols, rows) {
   }
   setStatus(id, 'idle');
   proc.onData((data) => toRenderer('pty:data', { id, data }));
-  proc.onExit(() => {
+  proc.onExit(({ exitCode, signal }) => {
+    log.info('session exited', id, 'code', exitCode, 'signal', signal);
     ptys.delete(id);
     setStatus(id, 'stopped');
     toRenderer('pty:exit', { id });
@@ -439,6 +441,7 @@ function registerIpc() {
   });
   ipcMain.on('session:active', (e, id) => { activeId = id; });
   ipcMain.on('link:open', (e, url) => openExternalLink(url));
+  ipcMain.on('log:error', (e, message) => log.error('renderer', message));
   ipcMain.handle('clipboard:paste', () => readClipboardForPaste());
   ipcMain.handle('dialog:pickDir', async () => {
     const result = await dialog.showOpenDialog(win, { properties: ['openDirectory'] });
@@ -453,6 +456,13 @@ app.setAppUserModelId('io.github.lvyyln.bettercli');
 if (!app.isPackaged) {
   app.setPath('userData', path.join(app.getPath('appData'), 'BetterCLI for Claude (dev)'));
 }
+
+log.init(path.join(app.getPath('userData'), 'logs'));
+// Native crashes leave minidumps in the crashDumps folder; nothing is uploaded.
+crashReporter.start({ uploadToServer: false });
+process.on('uncaughtException', (e) => log.error('uncaught exception', e));
+process.on('unhandledRejection', (e) => log.error('unhandled rejection', e));
+app.on('child-process-gone', (e, details) => log.error('child process gone', details));
 
 // A second copy would rewrite the shared hooks.json with its own port and cut every running session off from status updates.
 const isFirstInstance = app.requestSingleInstanceLock();
@@ -473,6 +483,7 @@ app.whenReady().then(async () => {
   if (!isFirstInstance) {
     return;
   }
+  log.info('started', app.getVersion(), process.platform, process.arch, 'electron', process.versions.electron);
   loadShellPath();
   loadStore();
   changes.init(app.getPath('userData'));
@@ -496,6 +507,9 @@ app.whenReady().then(async () => {
     }
   }, frame));
   win.on('focus', () => win.flashFrame(false));
+  win.on('unresponsive', () => log.warn('window unresponsive'));
+  win.on('responsive', () => log.info('window responsive again'));
+  win.webContents.on('render-process-gone', (e, details) => log.error('renderer gone', details));
   win.webContents.setWindowOpenHandler(({ url }) => {
     openExternalLink(url);
     return { action: 'deny' };
