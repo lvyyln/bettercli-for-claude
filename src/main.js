@@ -287,15 +287,21 @@ function openPty(id, cols, rows) {
   proc.onData((data) => toRenderer('pty:data', { id, data }));
   proc.onExit(({ exitCode, signal }) => {
     log.info('session exited', id, 'code', exitCode, 'signal', signal);
+    // A session reopened while its killed pty was still shutting down already has a newer pty.
+    if (ptys.has(id) && ptys.get(id) !== proc) {
+      return;
+    }
     ptys.delete(id);
     setStatus(id, 'stopped');
     toRenderer('pty:exit', { id });
   });
 }
 
+// Removed from the map before kill: node-pty corrupts the heap on a second kill(), or a resize after kill(), of the same Windows pty.
 function killPty(id) {
   const proc = ptys.get(id);
   if (proc) {
+    ptys.delete(id);
     proc.kill();
   }
 }
@@ -518,8 +524,8 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
-  for (const proc of ptys.values()) {
-    proc.kill();
+  for (const id of Array.from(ptys.keys())) {
+    killPty(id);
   }
   app.quit();
 });
