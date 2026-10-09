@@ -1,7 +1,7 @@
 {
   "name": "bettercli-for-claude",
   "productName": "BetterCLI for Claude",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Desktop session manager for Claude Code: tabs, groups, and one-click session forks",
   "main": "src/main.js",
   "private": true,
