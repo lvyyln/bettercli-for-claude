@@ -448,7 +448,10 @@ async function openSession(id) {
   fitActive();
   entry.term.focus();
   refreshChanges();
-  await desk.openPty(id, entry.term.cols, entry.term.rows);
+  const result = await desk.openPty(id, entry.term.cols, entry.term.rows);
+  if (result && result.error) {
+    entry.term.write('\x1b[31m' + result.error.replace(/\n/g, '\r\n') + '\x1b[0m\r\n');
+  }
 }
 
 function closeTab(id) {
@@ -708,10 +711,10 @@ function wireDesk() {
       entry.term.write(data);
     }
   });
-  desk.onExit(({ id }) => {
+  desk.onExit(({ id, exitCode }) => {
     const entry = terms.get(id);
     if (entry) {
-      entry.term.write('\r\n\x1b[90m[session ended: click the tab or session to resume]\x1b[0m\r\n');
+      entry.term.write('\r\n\x1b[90m[session ended with exit code ' + exitCode + ': click the tab or session to resume]\x1b[0m\r\n');
     }
   });
   desk.onFocusSession(({ id }) => openSession(id));

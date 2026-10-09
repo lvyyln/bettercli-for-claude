@@ -74,7 +74,7 @@ function loadShellPath() {
   }
 }
 
-function resolveClaude() {
+function claudeSearchDirs() {
   const home = os.homedir();
   const fallbacks = [
     path.join(home, '.local', 'bin'),
@@ -83,7 +83,11 @@ function resolveClaude() {
     '/usr/local/bin',
     path.join(process.env.APPDATA || '', 'npm')
   ];
-  const dirs = (process.env.PATH || '').split(path.delimiter).concat(fallbacks);
+  return (process.env.PATH || '').split(path.delimiter).concat(fallbacks).filter((dir) => dir);
+}
+
+function resolveClaude() {
+  const dirs = claudeSearchDirs();
   const names = IS_WIN ? ['claude.exe', 'claude.cmd'] : ['claude'];
   for (const dir of dirs) {
     for (const name of names) {
@@ -271,13 +275,23 @@ function openPty(id, cols, rows) {
   for (const name of PARENT_SESSION_VARS) {
     delete env[name];
   }
-  const proc = pty.spawn(resolveClaude(), buildArgs(session), {
-    name: 'xterm-256color',
-    cols: cols || 120,
-    rows: rows || 30,
-    cwd: session.cwd,
-    env
-  });
+  const file = resolveClaude();
+  let proc;
+  try {
+    proc = pty.spawn(file, buildArgs(session), {
+      name: 'xterm-256color',
+      cols: cols || 120,
+      rows: rows || 30,
+      cwd: session.cwd,
+      env
+    });
+  } catch (e) {
+    log.error('could not start claude', file, 'in', session.cwd, e);
+    if (file === 'claude') {
+      return { error: 'Claude Code was not found. Install it or add it to PATH, then restart the app. Looked in:\n' + claudeSearchDirs().join('\n') };
+    }
+    return { error: 'Could not start ' + file + ' in ' + session.cwd + ': ' + e.message };
+  }
   ptys.set(id, proc);
   if (session.pending) {
     delete session.pending;
@@ -293,7 +307,7 @@ function openPty(id, cols, rows) {
     }
     ptys.delete(id);
     setStatus(id, 'stopped');
-    toRenderer('pty:exit', { id });
+    toRenderer('pty:exit', { id, exitCode });
   });
 }
 
