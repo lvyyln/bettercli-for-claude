@@ -61,12 +61,6 @@
           ]
         },
         {
-          "target": "portable",
-          "arch": [
-            "x64"
-          ]
-        },
-        {
           "target": "zip",
           "arch": [
             "x64",
@@ -80,9 +74,6 @@
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
       "artifactName": "BetterCLI-${version}-setup-${arch}.${ext}"
-    },
-    "portable": {
-      "artifactName": "BetterCLI-${version}-portable.${ext}"
     },
     "mac": {
       "category": "public.app-category.developer-tools",

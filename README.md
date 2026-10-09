@@ -30,7 +30,6 @@ Download from the [latest release](https://github.com/lvyyln/bettercli-for-claud
 | OS | File | Notes |
 |---|---|---|
 | Windows | `BetterCLI-x.y.z-setup.exe` | Installer for x64 and ARM64. `-setup-x64` / `-setup-arm64` are smaller single-architecture installers. |
-| Windows | `BetterCLI-x.y.z-portable.exe` | No install; run from anywhere. |
 | Windows | `BetterCLI-x.y.z-win-x64.zip` | Unzip and run. |
 | macOS | `BetterCLI-x.y.z-mac-arm64.dmg` / `-mac-x64.dmg` | Apple Silicon / Intel. |
 | Linux | `.AppImage`, `.deb`, `.tar.gz` | x64. |
