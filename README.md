@@ -18,6 +18,15 @@ Every tab is the real `claude` terminal UI, so slash commands, skills, MCP serve
 - **Your existing sessions**: the "Claude CLI sessions" section lists sessions you ran in a normal terminal; click one to bring it in and continue it.
 - **Themes**: Midnight, Nord, Dracula, Solarized Dark, Daylight. The terminal and window title bar follow the theme.
 
+## Documentation
+
+Full documentation is in [`docs/`](docs/README.md):
+
+- [Getting started](docs/tutorials/getting-started.md): a 15-minute walkthrough
+- [How-to guides](docs/README.md#how-to-guides): importing terminal sessions, reviewing changes, troubleshooting, building, releasing
+- [Reference](docs/README.md#reference): shortcuts, statuses, files and folders, `claude` command lines, IPC API
+- [Explanation](docs/README.md#explanation): architecture, hooks, forks, change tracking, security
+
 ## Requirements
 
 - [Claude Code](https://docs.claude.com/en/docs/claude-code/setup) installed and signed in (`claude` must work in a terminal).
