@@ -276,15 +276,26 @@ function openPty(id, cols, rows) {
     delete env[name];
   }
   const file = resolveClaude();
+  const options = {
+    name: 'xterm-256color',
+    cols: cols || 120,
+    rows: rows || 30,
+    cwd: session.cwd,
+    env,
+    // The ConPTY built into Windows 10 drops mouse input, so wheel scrolling never reaches Claude's fullscreen mode.
+    useConptyDll: IS_WIN
+  };
   let proc;
   try {
-    proc = pty.spawn(file, buildArgs(session), {
-      name: 'xterm-256color',
-      cols: cols || 120,
-      rows: rows || 30,
-      cwd: session.cwd,
-      env
-    });
+    try {
+      proc = pty.spawn(file, buildArgs(session), options);
+    } catch (e) {
+      if (!options.useConptyDll) {
+        throw e;
+      }
+      log.warn('bundled conpty.dll failed, using the Windows one', e.message);
+      proc = pty.spawn(file, buildArgs(session), Object.assign({}, options, { useConptyDll: false }));
+    }
   } catch (e) {
     log.error('could not start claude', file, 'in', session.cwd, e);
     if (file === 'claude') {
