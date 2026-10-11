@@ -45,7 +45,8 @@
       "package.json"
     ],
     "asarUnpack": [
-      "node_modules/node-pty/**"
+      "node_modules/node-pty/**",
+      "src/orchestrator-mcp.js"
     ],
     "directories": {
       "output": "dist",

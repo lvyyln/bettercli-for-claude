@@ -10,7 +10,9 @@ const state = {
   fontSize: 13,
   changesOpen: false,
   changes: [],
-  selectedChange: null
+  selectedChange: null,
+  dragId: null,
+  treeStale: false
 };
 const IS_MAC = desk.platform === 'darwin';
 const FONT_MIN = 9;
@@ -31,7 +33,9 @@ const ICONS = {
   edit: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 20h4L19 9l-4-4L4 16z"></path></svg>',
   close: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"></path></svg>',
   plus: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>',
-  refresh: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"></path></svg>'
+  refresh: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"></path></svg>',
+  orch: '<svg class="kind" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="5" r="2.5"></circle><circle cx="5" cy="19" r="2.5"></circle><circle cx="19" cy="19" r="2.5"></circle><path d="M12 7.5V12M12 12l-6 5M12 12l6 5"></path></svg>',
+  expand: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"></path></svg>'
 };
 
 function esc(text) {
@@ -141,17 +145,86 @@ function toggleSection(key) {
   renderTree();
 }
 
+// The parent a session is drawn under: its parentId, unless that parent sits in another group.
+function treeParent(s) {
+  return s.parentId && state.sessions.some((p) => p.id === s.parentId && p.group === s.group) ? s.parentId : null;
+}
+
+// Only siblings can swap places; forks always follow their parent.
+function canDrop(id, target) {
+  const dragged = find(id);
+  return Boolean(dragged) && dragged.id !== target.id &&
+    dragged.group === target.group && treeParent(dragged) === treeParent(target);
+}
+
+function clearDropMarks() {
+  for (const el of $('tree').querySelectorAll('.drop-before, .drop-after')) {
+    el.classList.remove('drop-before', 'drop-after');
+  }
+}
+
+function moveSession(id, targetId, after) {
+  const moving = find(id);
+  const list = state.sessions.filter((s) => s.id !== id);
+  const index = list.findIndex((s) => s.id === targetId) + (after ? 1 : 0);
+  list.splice(index, 0, moving);
+  state.sessions = list;
+  renderTree();
+  desk.reorderSessions(list.map((s) => s.id)).catch((e) => desk.logError('reorder failed: ' + e.message));
+}
+
+function makeDraggable(item, s) {
+  item.draggable = true;
+  item.addEventListener('dragstart', (e) => {
+    state.dragId = s.id;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', s.id);
+    item.classList.add('dragging');
+  });
+  item.addEventListener('dragover', (e) => {
+    if (!canDrop(state.dragId, s)) {
+      return;
+    }
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const box = item.getBoundingClientRect();
+    const after = e.clientY > box.top + box.height / 2;
+    clearDropMarks();
+    item.classList.add(after ? 'drop-after' : 'drop-before');
+  });
+  item.addEventListener('dragleave', () => item.classList.remove('drop-before', 'drop-after'));
+  item.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const id = state.dragId;
+    const after = item.classList.contains('drop-after');
+    state.dragId = null;
+    if (canDrop(id, s)) {
+      moveSession(id, s.id, after);
+    }
+  });
+  item.addEventListener('dragend', () => {
+    state.dragId = null;
+    item.classList.remove('dragging');
+    clearDropMarks();
+    if (state.treeStale) {
+      renderTree();
+    }
+  });
+}
+
 function sessionRow(s, depth) {
   const item = document.createElement('div');
   item.className = 'item' + (s.id === state.active ? ' selected' : '');
   item.style.paddingLeft = (8 + depth * 16) + 'px';
   item.title = s.cwd;
+  makeDraggable(item, s);
   item.innerHTML =
     (depth > 0 ? ICONS.branch : '') +
     dot(s.id) +
+    (isOrchestrator(s) ? ICONS.orch : '') +
     `<span class="name">${esc(s.title)}</span>` +
     '<span class="actions">' +
-    `<button class="icon-btn" data-act="fork" title="Fork" aria-label="Fork">${ICONS.fork}</button>` +
+    (isOrchestrator(s) ? '' : `<button class="icon-btn" data-act="fork" title="Fork" aria-label="Fork">${ICONS.fork}</button>`) +
     `<button class="icon-btn" data-act="edit" title="Edit" aria-label="Edit">${ICONS.edit}</button>` +
     '</span>';
   item.addEventListener('click', (e) => {
@@ -199,6 +272,12 @@ function historyRow(h) {
 }
 
 function renderTree() {
+  // Rebuilding the rows mid-drag would cancel the drag; status updates wait until dragend.
+  if (state.dragId) {
+    state.treeStale = true;
+    return;
+  }
+  state.treeStale = false;
   const tree = $('tree');
   tree.innerHTML = '';
   const add = `<span class="icon-btn add" data-act="add" title="New session in this group" aria-label="New session in this group">${ICONS.plus}</span>`;
@@ -252,7 +331,13 @@ function renderHeader() {
     return;
   }
   const parent = s.parentId ? find(s.parentId) : null;
-  $('crumb').textContent = s.group + (parent ? '  ›  forked from ' + parent.title : '');
+  if (isOrchestrator(s)) {
+    const count = workersOf(s.id).length;
+    $('crumb').textContent = s.group + '  ›  orchestration · ' + count + (count === 1 ? ' agent' : ' agents');
+  } else {
+    $('crumb').textContent = s.group + (parent ? '  ›  forked from ' + parent.title : '');
+  }
+  $('btn-fork').classList.toggle('hidden', isOrchestrator(s));
   $('title').textContent = s.title;
   $('statusbar').innerHTML =
     `<span class="stat">${dot(s.id)}${STATUS_TEXT[statusOf(s.id)]}</span>` +
@@ -265,6 +350,11 @@ function render() {
   renderTabs();
   renderHeader();
   renderChanges();
+  for (const [id, entry] of terms) {
+    if (entry.grid) {
+      renderOrch(id);
+    }
+  }
 }
 
 const CHANGE_LETTER = { added: 'A', modified: 'M', deleted: 'D' };
@@ -385,10 +475,13 @@ async function loadHistory() {
   renderTree();
 }
 
-function createTerminal(id) {
-  const el = document.createElement('div');
-  el.className = 'term';
-  $('terminals').appendChild(el);
+// Opens an xterm for a session in `host`, or in a new full-size .term element when no host is given.
+function createTerminal(id, host) {
+  const el = host || document.createElement('div');
+  if (!host) {
+    el.className = 'term';
+    $('terminals').appendChild(el);
+  }
   const term = new Terminal({
     fontFamily: "'Cascadia Mono', Consolas, monospace",
     fontSize: state.fontSize,
@@ -425,24 +518,172 @@ function openLink(e, uri) {
   }
 }
 
-function fitActive() {
-  const entry = terms.get(state.active);
+function fitEntry(id) {
+  const entry = terms.get(id);
   if (!entry) {
     return;
   }
   entry.fit.fit();
-  desk.resize(state.active, entry.term.cols, entry.term.rows);
+  desk.resize(id, entry.term.cols, entry.term.rows);
+}
+
+// The active tab, plus every agent tile when it is an orchestration.
+function fitActive() {
+  if (!state.active) {
+    return;
+  }
+  fitEntry(state.active);
+  for (const w of workersOf(state.active)) {
+    fitEntry(w.id);
+  }
+}
+
+function isOrchestrator(s) {
+  return Boolean(s) && s.kind === 'orchestrator';
+}
+
+function workersOf(orchId) {
+  return state.sessions.filter((s) => s.kind === 'worker' && s.orchestratorId === orchId);
+}
+
+function createOrchView(id) {
+  const view = document.createElement('div');
+  view.className = 'term orch-view';
+  view.innerHTML =
+    '<div class="orch-main"><div class="xterm-host"></div></div>' +
+    '<div class="orch-side"><div class="orch-side-head"><span>Agents</span><span class="count"></span></div>' +
+    '<div class="orch-grid"></div></div>';
+  $('terminals').appendChild(view);
+  const entry = createTerminal(id, view.querySelector('.orch-main .xterm-host'));
+  entry.el = view;
+  entry.grid = view.querySelector('.orch-grid');
+  renderOrch(id);
+  return entry;
+}
+
+function addTile(worker) {
+  const owner = terms.get(worker.orchestratorId);
+  if (!owner || !owner.grid || terms.has(worker.id)) {
+    return;
+  }
+  const tile = document.createElement('div');
+  tile.className = 'tile';
+  tile.innerHTML =
+    '<div class="tile-head"><i class="dot"></i><span class="name"></span><span class="state"></span>' +
+    `<button class="icon-btn" data-act="expand" title="Enlarge" aria-label="Enlarge">${ICONS.expand}</button>` +
+    '<button class="btn small" data-act="power"></button></div>' +
+    '<div class="tile-body"><div class="xterm-host"></div></div>';
+  owner.grid.appendChild(tile);
+  const entry = createTerminal(worker.id, tile.querySelector('.xterm-host'));
+  entry.el = tile;
+  entry.embedded = true;
+  tile.querySelector('[data-act="expand"]').addEventListener('click', () => {
+    tile.classList.toggle('expanded');
+    fitActive();
+  });
+  tile.querySelector('[data-act="power"]').addEventListener('click', () => toggleWorker(worker.id));
+  tile.addEventListener('focusin', () => markFocusedTile(worker.id));
+  updateTile(worker.id);
+}
+
+function updateTile(id) {
+  const entry = terms.get(id);
+  const s = find(id);
+  if (!entry || !entry.embedded || !s) {
+    return;
+  }
+  const status = statusOf(id);
+  const head = entry.el.querySelector('.tile-head');
+  head.querySelector('.dot').className = 'dot ' + status;
+  head.querySelector('.name').textContent = s.title;
+  head.title = s.task || s.title;
+  head.querySelector('.state').textContent = STATUS_TEXT[status];
+  head.querySelector('[data-act="power"]').textContent = status === 'stopped' ? 'Resume' : 'Stop';
+}
+
+// Keeps an orchestration's tiles in step with its workers and their statuses.
+function renderOrch(orchId) {
+  const entry = terms.get(orchId);
+  const orch = find(orchId);
+  if (!entry || !entry.grid || !orch) {
+    return;
+  }
+  const workers = workersOf(orchId);
+  for (const w of workers) {
+    addTile(w);
+    updateTile(w.id);
+  }
+  const running = workers.filter((w) => statusOf(w.id) !== 'stopped').length;
+  entry.el.querySelector('.orch-side-head .count').textContent = `${running} of ${orch.orch.maxAgents} running`;
+  const empty = entry.grid.querySelector('.orch-empty');
+  if (!workers.length && !empty) {
+    entry.grid.insertAdjacentHTML('beforeend', '<div class="orch-empty">No agents yet. They appear here as the orchestrator starts them.</div>');
+  } else if (workers.length && empty) {
+    empty.remove();
+  }
+}
+
+function markFocusedTile(id) {
+  const entry = terms.get(id);
+  if (!entry || !entry.embedded) {
+    return;
+  }
+  for (const tile of entry.el.parentElement.querySelectorAll('.tile')) {
+    tile.classList.toggle('focused', tile === entry.el);
+  }
+}
+
+function focusTile(id) {
+  const entry = terms.get(id);
+  if (!entry || !entry.embedded) {
+    return;
+  }
+  entry.el.scrollIntoView({ block: 'nearest' });
+  entry.term.focus();
+  markFocusedTile(id);
+}
+
+async function toggleWorker(id) {
+  const entry = terms.get(id);
+  if (statusOf(id) !== 'stopped') {
+    desk.killPty(id);
+    return;
+  }
+  fitEntry(id);
+  const result = await desk.openPty(id, entry.term.cols, entry.term.rows);
+  if (result && result.error) {
+    entry.term.write('\x1b[31m' + result.error.replace(/\n/g, '\r\n') + '\x1b[0m\r\n');
+  }
+}
+
+function disposeTerminal(id) {
+  const entry = terms.get(id);
+  if (entry) {
+    entry.term.dispose();
+    entry.el.remove();
+    terms.delete(id);
+  }
 }
 
 async function openSession(id) {
-  const entry = terms.get(id) || createTerminal(id);
+  const s = find(id);
+  // An agent lives in its orchestration's view; open that and bring the agent's tile into focus.
+  const owner = s && s.kind === 'worker' ? find(s.orchestratorId) : null;
+  if (owner) {
+    await openSession(owner.id);
+    focusTile(id);
+    return;
+  }
+  const entry = terms.get(id) || (isOrchestrator(s) ? createOrchView(id) : createTerminal(id));
   if (!state.open.includes(id)) {
     state.open.push(id);
   }
   state.active = id;
   desk.setActive(id);
   for (const [otherId, other] of terms) {
-    other.el.classList.toggle('active', otherId === id);
+    if (!other.embedded) {
+      other.el.classList.toggle('active', otherId === id);
+    }
   }
   render();
   fitActive();
@@ -456,12 +697,12 @@ async function openSession(id) {
 
 function closeTab(id) {
   desk.killPty(id);
-  const entry = terms.get(id);
-  if (entry) {
-    entry.term.dispose();
-    entry.el.remove();
-    terms.delete(id);
+  // Closing an orchestration stops its agents too, so none keep running out of sight.
+  for (const w of workersOf(id)) {
+    desk.killPty(w.id);
+    disposeTerminal(w.id);
   }
+  disposeTerminal(id);
   state.open = state.open.filter((x) => x !== id);
   if (state.active === id) {
     state.active = state.open[state.open.length - 1] || null;
@@ -600,6 +841,10 @@ async function pasteClipboard() {
 }
 
 async function forkSession(parentId) {
+  // A fork would lose the orchestration tools, so orchestrators are not forked.
+  if (!parentId || isOrchestrator(find(parentId))) {
+    return;
+  }
   const session = await desk.forkSession(parentId);
   state.sessions.push(session);
   openSession(session.id);
@@ -610,13 +855,23 @@ function openModal(mode, id, group) {
   modal = { mode, id };
   const inGroup = group ? state.sessions.filter((x) => x.group === group) : [];
   const s = id ? find(id) : inGroup[inGroup.length - 1] || find(state.active);
-  $('modal-title').textContent = mode === 'new' ? 'New session' : 'Edit session';
-  $('f-title').value = mode === 'new' ? '' : s.title;
+  const creating = mode !== 'edit';
+  $('modal-title').textContent = mode === 'orch' ? 'New orchestration' : creating ? 'New session' : 'Edit session';
+  $('f-title').value = creating ? '' : s.title;
   $('f-group').value = group || (s ? s.group : 'Scratch');
   $('f-cwd').value = s ? s.cwd : '';
-  $('f-cwd').required = mode === 'new';
-  $('cwd-row').classList.toggle('hidden', mode !== 'new');
-  $('btn-remove').classList.toggle('hidden', mode === 'new');
+  $('f-cwd').required = creating;
+  $('cwd-row').classList.toggle('hidden', !creating);
+  $('btn-remove').classList.toggle('hidden', creating);
+  $('orch-fields').classList.toggle('hidden', mode !== 'orch');
+  if (mode === 'orch') {
+    $('f-goal').value = '';
+    $('f-max').value = '5';
+    $('f-isolation').value = 'shared';
+    $('f-perm').value = 'manual';
+    $('f-autoapprove').checked = false;
+    $('perm-warning').classList.add('hidden');
+  }
   $('modal').showModal();
   $('f-title').focus();
 }
@@ -624,10 +879,21 @@ function openModal(mode, id, group) {
 async function submitModal() {
   const title = $('f-title').value.trim();
   const group = $('f-group').value.trim() || 'Scratch';
-  if (modal.mode === 'new') {
+  if (modal.mode !== 'edit') {
+    const fields = { title, group, cwd: $('f-cwd').value.trim() };
     let session;
     try {
-      session = await desk.createSession({ title, group, cwd: $('f-cwd').value.trim() });
+      if (modal.mode === 'orch') {
+        session = await desk.createOrchestration(Object.assign(fields, {
+          goal: $('f-goal').value,
+          maxAgents: Number($('f-max').value),
+          isolation: $('f-isolation').value,
+          permissionMode: $('f-perm').value,
+          autoApproveTools: $('f-autoapprove').checked
+        }));
+      } else {
+        session = await desk.createSession(fields);
+      }
     } catch (e) {
       alert(e.message.replace(/^.*Error: /, ''));
       return;
@@ -650,6 +916,9 @@ async function removeSession(id) {
     }
   }
   state.sessions = state.sessions.filter((s) => s.id !== id);
+  if (terms.has(id) && terms.get(id).embedded) {
+    disposeTerminal(id);
+  }
   if (state.open.includes(id)) {
     closeTab(id);
   } else {
@@ -660,6 +929,9 @@ async function removeSession(id) {
 function wireUi() {
   $('btn-new').addEventListener('click', () => openModal('new'));
   $('btn-new-empty').addEventListener('click', () => openModal('new'));
+  $('btn-orch').addEventListener('click', () => openModal('orch'));
+  $('btn-orch-empty').addEventListener('click', () => openModal('orch'));
+  $('f-perm').addEventListener('change', (e) => $('perm-warning').classList.toggle('hidden', e.target.value !== 'bypassPermissions'));
   $('btn-fork').addEventListener('click', () => forkSession(state.active));
   $('btn-edit').addEventListener('click', () => openModal('edit', state.active));
   $('btn-changes').addEventListener('click', () => toggleChanges());
@@ -714,8 +986,18 @@ function wireDesk() {
   desk.onExit(({ id, exitCode }) => {
     const entry = terms.get(id);
     if (entry) {
-      entry.term.write('\r\n\x1b[90m[session ended with exit code ' + exitCode + ': click the tab or session to resume]\x1b[0m\r\n');
+      const how = entry.embedded ? 'use Resume on this tile' : 'click the tab or session to resume';
+      entry.term.write('\r\n\x1b[90m[session ended with exit code ' + exitCode + ': ' + how + ']\x1b[0m\r\n');
     }
+  });
+  // An orchestrator started an agent: give it a tile before its first output arrives.
+  desk.onSessionAdded((session) => {
+    if (!find(session.id)) {
+      state.sessions.push(session);
+    }
+    addTile(session);
+    render();
+    requestAnimationFrame(() => fitActive());
   });
   desk.onFocusSession(({ id }) => openSession(id));
   desk.onChanges(({ id }) => {

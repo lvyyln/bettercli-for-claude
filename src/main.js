@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const pty = require('node-pty');
 const changes = require('./changes');
+const orchestration = require('./orchestration');
 const log = require('./log');
 
 const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
@@ -142,6 +143,7 @@ function setStatus(id, status) {
   statuses.set(id, status);
   toRenderer('status', { id, status });
   notifyStatus(id, previous, status);
+  orchestration.onStatus(id, status);
 }
 
 function windowAlive() {
@@ -155,10 +157,12 @@ function notifyStatus(id, previous, status) {
   if (!needsInput && !finished) {
     return;
   }
-  if (windowAlive() && win.isFocused() && id === activeId) {
+  const session = findSession(id);
+  // Workers are on screen while their orchestration is the active tab.
+  const onScreen = id === activeId || Boolean(session && session.orchestratorId === activeId);
+  if (windowAlive() && win.isFocused() && onScreen) {
     return;
   }
-  const session = findSession(id);
   if (!session || !Notification.isSupported()) {
     return;
   }
@@ -227,7 +231,19 @@ function startHookServer() {
     const server = http.createServer((req, res) => {
       let body = '';
       req.on('data', (chunk) => { body += chunk; });
-      req.on('end', () => {
+      req.on('end', async () => {
+        if (req.url === '/orchestrate') {
+          let reply;
+          try {
+            reply = await orchestration.handleRequest(JSON.parse(body));
+          } catch (e) {
+            log.error('orchestration request failed', e);
+            reply = { error: e.message };
+          }
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify(reply));
+          return;
+        }
         try {
           const payload = JSON.parse(body);
           const id = payload.session_id;
@@ -247,6 +263,8 @@ function startHookServer() {
         res.end('ok');
       });
     });
+    // wait_for_agents keeps a request open for up to 30 minutes.
+    server.requestTimeout = 0;
     server.listen(0, '127.0.0.1', () => {
       hookPort = server.address().port;
       resolve();
@@ -255,11 +273,16 @@ function startHookServer() {
 }
 
 function buildArgs(session) {
-  const args = ['--settings', hooksPath];
+  const extra = orchestration.extraArgs(session);
+  const args = ['--settings', hooksPath].concat(extra.flags);
   if (session.pending === 'fork') {
     args.push('--resume', session.parentId, '--fork-session', '--session-id', session.id, '-n', session.title);
   } else if (session.pending === 'new' || !findJsonl(session.id)) {
     args.push('--session-id', session.id, '-n', session.title);
+    // "--" ends the options, so flags that take several values cannot swallow the prompt.
+    if (session.pending === 'new' && extra.prompt) {
+      args.push('--', extra.prompt);
+    }
   } else {
     args.push('--resume', session.id);
   }
@@ -323,6 +346,13 @@ function openPty(id, cols, rows) {
 }
 
 // Removed from the map before kill: node-pty corrupts the heap on a second kill(), or a resize after kill(), of the same Windows pty.
+function writePty(id, data) {
+  const proc = ptys.get(id);
+  if (proc) {
+    proc.write(data);
+  }
+}
+
 function killPty(id) {
   const proc = ptys.get(id);
   if (proc) {
@@ -427,6 +457,13 @@ function registerIpc() {
       pending: 'fork'
     });
   });
+  ipcMain.handle('orch:create', (e, fields) => {
+    const { title, group, cwd } = fields;
+    if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
+      throw new Error('Folder not found: ' + cwd);
+    }
+    return addSession({ title, group, cwd, parentId: null, kind: 'orchestrator', orch: orchestration.normalizeOptions(fields), pending: 'new' });
+  });
   ipcMain.handle('session:import', (e, { id, title, cwd }) =>
     addSession({ id, title, cwd, group: 'Imported', parentId: null }));
   ipcMain.handle('session:update', (e, { id, title, group }) => {
@@ -436,8 +473,23 @@ function registerIpc() {
     saveStore();
     return session;
   });
+  // The sidebar shows sessions in store order, so reordering is a permutation of the stored list.
+  ipcMain.handle('session:reorder', (e, ids) => {
+    const byId = new Map(store.sessions.map((s) => [s.id, s]));
+    if (ids.length !== byId.size || new Set(ids).size !== ids.length || !ids.every((id) => byId.has(id))) {
+      throw new Error('Reorder must list every session exactly once');
+    }
+    store.sessions = ids.map((id) => byId.get(id));
+    saveStore();
+  });
   ipcMain.handle('session:remove', (e, id) => {
     killPty(id);
+    // Workers outlive their orchestrator as ordinary sessions, but stop with it.
+    if (findSession(id).kind === 'orchestrator') {
+      for (const worker of orchestration.workersOf(id)) {
+        killPty(worker.id);
+      }
+    }
     for (const s of store.sessions) {
       if (s.parentId === id) {
         s.parentId = findSession(id).parentId;
@@ -452,12 +504,7 @@ function registerIpc() {
   ipcMain.handle('changes:open', (e, file) => shell.openPath(file));
   ipcMain.handle('pty:open', (e, { id, cols, rows }) => openPty(id, cols, rows));
   ipcMain.handle('pty:kill', (e, id) => killPty(id));
-  ipcMain.on('pty:write', (e, { id, data }) => {
-    const proc = ptys.get(id);
-    if (proc) {
-      proc.write(data);
-    }
-  });
+  ipcMain.on('pty:write', (e, { id, data }) => writePty(id, data));
   ipcMain.on('pty:resize', (e, { id, cols, rows }) => {
     const proc = ptys.get(id);
     if (proc) {
@@ -519,6 +566,21 @@ app.whenReady().then(async () => {
   loadStore();
   changes.init(app.getPath('userData'));
   await startHookServer();
+  orchestration.init({
+    store: () => store,
+    findSession,
+    addSession,
+    openPty,
+    killPty,
+    writePty,
+    isRunning: (id) => ptys.has(id),
+    statusOf: (id) => statuses.get(id) || 'stopped',
+    toRenderer,
+    findJsonl,
+    hookPort: () => hookPort,
+    userData: app.getPath('userData'),
+    log
+  });
   writeHooksSettings();
   registerIpc();
   // macOS draws its traffic lights inside the bar; Windows and Linux draw caption buttons via the overlay.

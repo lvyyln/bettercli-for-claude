@@ -43,6 +43,7 @@ Download from the [latest release](https://github.com/lvyyln/bettercli-for-claud
 
 - **New session**: `+` in the sidebar. Pick a title, a group and a working directory.
 - **Fork**: hover a session and click the fork icon, or use *Fork* in the header.
+- **Reorder**: drag a session up or down in the sidebar. It can move among sessions at the same level of its group; forks move with their parent.
 - **Edit**: rename, move to another group, or remove from the sidebar. Removing never deletes the conversation from `~/.claude/projects`.
 - Closing a tab stops that Claude process. Click the session again to resume it.
 - With the Daylight theme, also run `/theme` inside Claude and choose a light theme, since Claude draws its own colors.
