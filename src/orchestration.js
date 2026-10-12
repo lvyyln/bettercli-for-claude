@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 
 const TOKEN = crypto.randomBytes(24).toString('hex');
 const WAIT_DEFAULT = 300;
@@ -25,6 +25,8 @@ function init(ctx) {
   app = ctx;
   configDir = path.join(ctx.userData, 'orchestrations');
   fs.mkdirSync(configDir, { recursive: true });
+  recoverPlans();
+  ctx.saveStore();
 }
 
 function mcpScriptPath() {
@@ -66,7 +68,10 @@ function orchestratorPrompt(session) {
     `You coordinate worker agents with the bettercli MCP tools (spawn_agent, list_agents, wait_for_agents, ` +
       `read_agent_output, send_to_agent, stop_agent). At most ${o.maxAgents} agents can run at the same time.`,
     'The user watches every agent live in a grid next to you and can type into any of them.',
-    'How to work:',
+    'Usually the user starts work from the Plan box beside you: a planner splits their goal into tasks, the user ' +
+      'reviews them, BetterCLI starts one agent per task, and when all agents are done you receive every ' +
+      'result in one message. Then review and integrate the results and give the user a combined summary.',
+    'You can also start agents yourself with the tools, for follow-ups or when the user asks you directly. In that case:',
     '1. Make sure you understand the goal; ask the user if it is unclear. Split it into tasks that can run in ' +
       'parallel. Use as many agents as the work needs, up to the limit. For a small job, one agent or none is fine.',
     '2. Workers start with no knowledge of this conversation. Give each a complete, self-contained task: the ' +
@@ -102,7 +107,8 @@ function extraArgs(session) {
     if (session.orch.autoApproveTools) {
       flags.push('--allowedTools', 'mcp__bettercli');
     }
-    return { flags, prompt: session.orch.goal || null };
+    // The goal from the form goes to the planner, not to the orchestrator.
+    return { flags, prompt: null };
   }
   if (session.kind === 'worker') {
     return {
@@ -369,6 +375,281 @@ function onStatus(id, status) {
   if (waiters.size) {
     checkWaiters();
   }
+  checkRuns();
+}
+
+// ---- Plan pipeline: goal -> planner (read-only, headless) -> user reviews tasks -> agents -> wrap-up ----
+
+const planners = new Map();
+const LOG_MAX = 40;
+const WRAP_REPLY_MAX = 3000;
+
+function planSchema(max) {
+  return {
+    type: 'object',
+    properties: {
+      tasks: {
+        type: 'array',
+        minItems: 1,
+        maxItems: max,
+        items: {
+          type: 'object',
+          properties: {
+            label: { type: 'string', description: 'Two to four words naming the task.' },
+            prompt: { type: 'string', description: 'Complete, self-contained instructions for the agent.' }
+          },
+          required: ['label', 'prompt']
+        }
+      }
+    },
+    required: ['tasks']
+  };
+}
+
+function plannerPrompt(orch, goal) {
+  const o = orch.orch;
+  const where = o.isolation === 'worktree'
+    ? 'Each agent works in its own git worktree on its own branch; the branches are merged afterwards.'
+    : 'All agents work in the same folder at the same time, so no two tasks may edit the same file.';
+  return [
+    `Plan work for a team of at most ${o.maxAgents} Claude Code agents that run in parallel in ${orch.cwd}.`,
+    where,
+    'Look at the project as much as you need (you can only read). Then split the goal below into independent ' +
+      `tasks, between 1 and ${o.maxAgents}. Use fewer tasks when the goal is small; do not split work that has ` +
+      'to happen in order.',
+    'Each agent starts with no other context, so every task prompt must be self-contained: the relevant ' +
+      'background, exactly which files or areas it owns, constraints, how to check its work, and what to report.',
+    '',
+    'Goal:',
+    goal
+  ].join('\n');
+}
+
+function setPlan(orch, plan) {
+  orch.orch.plan = plan;
+  app.saveStore();
+  app.toRenderer('orch:plan', { id: orch.id, plan });
+}
+
+function getOrch(id) {
+  const orch = app.findSession(id);
+  if (!orch || orch.kind !== 'orchestrator') {
+    throw new Error('Orchestration not found');
+  }
+  return orch;
+}
+
+function describeToolUse(item) {
+  const input = item.input || {};
+  const target = input.file_path || input.pattern || input.path || '';
+  if (item.name === 'StructuredOutput') {
+    return 'Writing the plan';
+  }
+  return item.name + (target ? ' ' + String(target).replace(/\\/g, '/').split('/').slice(-3).join('/') : '');
+}
+
+function startPlan(id, goal) {
+  const orch = getOrch(id);
+  goal = String(goal || '').trim();
+  if (!goal) {
+    throw new Error('Type a goal first');
+  }
+  const phase = (orch.orch.plan || {}).phase;
+  if (phase === 'planning' || phase === 'running') {
+    throw new Error('This orchestration is already ' + phase);
+  }
+  const plan = { phase: 'planning', goal, log: [], tasks: [] };
+  setPlan(orch, plan);
+
+  const args = ['-p', '--output-format', 'stream-json', '--verbose', '--no-session-persistence',
+    '--tools', 'Read,Grep,Glob', '--json-schema', JSON.stringify(planSchema(orch.orch.maxAgents)),
+    '--', plannerPrompt(orch, goal)];
+  const file = app.resolveClaude();
+  // npm installs a claude.cmd shim, which Windows can only start through the shell.
+  const viaShell = /\.cmd$/i.test(file);
+  const child = spawn(viaShell ? `"${file}"` : file, viaShell ? args.map((a) => '"' + a.replace(/"/g, '\\"') + '"') : args, {
+    cwd: orch.cwd,
+    env: app.claudeEnv(),
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+    shell: viaShell
+  });
+  planners.set(id, child);
+  let buffer = '';
+  let stderr = '';
+  let result = null;
+  const log = (line) => {
+    plan.log.push(line);
+    if (plan.log.length > LOG_MAX) {
+      plan.log.shift();
+    }
+    app.toRenderer('orch:plan', { id, plan });
+  };
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => {
+    buffer += chunk;
+    let i;
+    while ((i = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, i).trim();
+      buffer = buffer.slice(i + 1);
+      if (!line) {
+        continue;
+      }
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch (e) {
+        continue;
+      }
+      if (event.type === 'assistant' && event.message && Array.isArray(event.message.content)) {
+        for (const item of event.message.content) {
+          if (item.type === 'tool_use') {
+            log(describeToolUse(item));
+          } else if (item.type === 'text' && item.text.trim()) {
+            log(item.text.trim().split('\n')[0].slice(0, 200));
+          }
+        }
+      } else if (event.type === 'result') {
+        result = event;
+      }
+    }
+  });
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (chunk) => { stderr = (stderr + chunk).slice(-2000); });
+  child.on('error', (e) => { stderr += e.message; });
+  child.on('close', (code) => {
+    if (planners.get(id) !== child) {
+      return;
+    }
+    planners.delete(id);
+    if (plan.phase !== 'planning') {
+      return;
+    }
+    const tasks = result && result.structured_output && result.structured_output.tasks;
+    if (Array.isArray(tasks) && tasks.length) {
+      setPlan(orch, { phase: 'review', goal, log: plan.log, tasks });
+      return;
+    }
+    const reason = (result && result.result) || stderr.trim().split('\n').pop() || 'planner exited with code ' + code;
+    app.log.warn('planner failed', code, reason);
+    setPlan(orch, { phase: 'error', goal, log: plan.log, tasks: [], error: 'Planning failed: ' + reason });
+  });
+  return plan;
+}
+
+function cancelPlan(id) {
+  const orch = getOrch(id);
+  const child = planners.get(id);
+  planners.delete(id);
+  if (child) {
+    child.kill();
+  }
+  setPlan(orch, { phase: 'idle', goal: (orch.orch.plan || {}).goal || '', log: [], tasks: [] });
+}
+
+function discardPlan(id) {
+  const orch = getOrch(id);
+  setPlan(orch, { phase: 'idle', goal: (orch.orch.plan || {}).goal || '', log: [], tasks: [] });
+}
+
+function runPlan(id, tasks) {
+  const orch = getOrch(id);
+  const plan = orch.orch.plan || {};
+  if (plan.phase !== 'review') {
+    throw new Error('There is no plan waiting to run');
+  }
+  const clean = (Array.isArray(tasks) ? tasks : [])
+    .map((t) => ({ label: String(t.label || '').trim(), prompt: String(t.prompt || '').trim() }))
+    .filter((t) => t.prompt);
+  if (!clean.length) {
+    throw new Error('The plan has no tasks');
+  }
+  const running = workersOf(id).filter((s) => app.isRunning(s.id)).length;
+  const free = orch.orch.maxAgents - running;
+  if (clean.length > free) {
+    throw new Error(`Only ${free} of ${orch.orch.maxAgents} agent slots are free. Remove tasks or stop running agents first.`);
+  }
+  const agentIds = [];
+  try {
+    for (const task of clean) {
+      agentIds.push(spawnAgent(orch, { label: task.label || 'Agent', task: task.prompt }).agentId);
+    }
+  } finally {
+    setPlan(orch, { phase: 'running', goal: plan.goal, log: [], tasks: clean, agentIds });
+  }
+  return orch.orch.plan;
+}
+
+// A run is complete when every agent has finished a turn or stopped; one waiting for the user is not.
+function checkRuns() {
+  for (const s of app.store().sessions) {
+    const plan = s.kind === 'orchestrator' && s.orch.plan;
+    if (!plan || plan.phase !== 'running' || plan.wrapping) {
+      continue;
+    }
+    const done = plan.agentIds.every((id) => {
+      const status = app.statusOf(id);
+      return status === 'stopped' || (status === 'idle' && turnStarted.get(id) !== false);
+    });
+    if (done) {
+      plan.wrapping = true;
+      wrapUp(s, plan).catch((e) => app.log.error('wrap-up failed', e));
+    }
+  }
+}
+
+async function wrapUp(orch, plan) {
+  const agents = await report(plan.agentIds.filter((id) => app.findSession(id)));
+  const worktrees = agents.filter((a) => a.branch);
+  const sections = agents.map((a) => {
+    const reply = a.lastReply ? (a.lastReply.length > WRAP_REPLY_MAX ? '…' + a.lastReply.slice(-WRAP_REPLY_MAX) : a.lastReply) : '(no reply)';
+    return `## ${a.label} (${a.status}${a.branch ? ', branch ' + a.branch : ''})\n${reply}`;
+  });
+  const message = [
+    `All ${agents.length} agents have finished the plan for this goal:`,
+    plan.goal,
+    '',
+    'Their results:',
+    '',
+    sections.join('\n\n'),
+    '',
+    worktrees.length
+      ? 'Review the results, merge the agents\' branches into the current branch (resolve conflicts and run checks), ' +
+        'then give me a combined summary: what was done, and anything that failed or is still open.'
+      : 'Review the results and check that the pieces fit together, then give me a combined summary: what was ' +
+        'done, and anything that failed or is still open.'
+  ].join('\n');
+  const sent = app.isRunning(orch.id);
+  if (sent) {
+    const closing = '\n\nThese agents have now been closed to free resources; their conversations are kept. ' +
+      'For follow-up work, start new agents with spawn_agent.';
+    app.writePty(orch.id, '\x1b[200~' + message + closing + '\x1b[201~');
+    setTimeout(() => app.writePty(orch.id, '\r'), 300);
+  }
+  // Their results are collected, so the finished agents' processes are no longer needed.
+  for (const id of plan.agentIds) {
+    app.killPty(id);
+  }
+  setPlan(orch, { phase: 'done', goal: plan.goal, log: [], tasks: plan.tasks, agentIds: plan.agentIds, summarySent: sent });
+}
+
+// Plans that were planning or running when the app closed cannot continue.
+function recoverPlans() {
+  for (const s of app.store().sessions) {
+    const plan = s.kind === 'orchestrator' && s.orch.plan;
+    if (plan && plan.phase === 'planning') {
+      s.orch.plan = { phase: 'idle', goal: plan.goal, log: [], tasks: [] };
+    } else if (plan && plan.phase === 'running') {
+      s.orch.plan = Object.assign({}, plan, { phase: 'done', wrapping: false, interrupted: true });
+    }
+  }
+}
+
+function shutdown() {
+  for (const child of planners.values()) {
+    child.kill();
+  }
+  planners.clear();
 }
 
 function normalizeOptions(fields) {
@@ -382,4 +663,7 @@ function normalizeOptions(fields) {
   };
 }
 
-module.exports = { init, extraArgs, handleRequest, onStatus, workersOf, normalizeOptions };
+module.exports = {
+  init, extraArgs, handleRequest, onStatus, workersOf, normalizeOptions,
+  startPlan, cancelPlan, discardPlan, runPlan, shutdown
+};

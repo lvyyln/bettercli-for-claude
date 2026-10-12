@@ -289,15 +289,20 @@ function buildArgs(session) {
   return args;
 }
 
+function claudeEnv() {
+  const env = Object.assign({}, process.env, { FORCE_COLOR: '1' });
+  for (const name of PARENT_SESSION_VARS) {
+    delete env[name];
+  }
+  return env;
+}
+
 function openPty(id, cols, rows) {
   if (ptys.has(id)) {
     return;
   }
   const session = findSession(id);
-  const env = Object.assign({}, process.env, { FORCE_COLOR: '1' });
-  for (const name of PARENT_SESSION_VARS) {
-    delete env[name];
-  }
+  const env = claudeEnv();
   const file = resolveClaude();
   const options = {
     name: 'xterm-256color',
@@ -464,6 +469,10 @@ function registerIpc() {
     }
     return addSession({ title, group, cwd, parentId: null, kind: 'orchestrator', orch: orchestration.normalizeOptions(fields), pending: 'new' });
   });
+  ipcMain.handle('orch:plan', (e, { id, goal }) => orchestration.startPlan(id, goal));
+  ipcMain.handle('orch:cancelPlan', (e, id) => orchestration.cancelPlan(id));
+  ipcMain.handle('orch:discardPlan', (e, id) => orchestration.discardPlan(id));
+  ipcMain.handle('orch:run', (e, { id, tasks }) => orchestration.runPlan(id, tasks));
   ipcMain.handle('session:import', (e, { id, title, cwd }) =>
     addSession({ id, title, cwd, group: 'Imported', parentId: null }));
   ipcMain.handle('session:update', (e, { id, title, group }) => {
@@ -570,6 +579,9 @@ app.whenReady().then(async () => {
     store: () => store,
     findSession,
     addSession,
+    saveStore,
+    resolveClaude,
+    claudeEnv,
     openPty,
     killPty,
     writePty,
@@ -611,6 +623,7 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
+  orchestration.shutdown();
   for (const id of Array.from(ptys.keys())) {
     killPty(id);
   }

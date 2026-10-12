@@ -552,13 +552,162 @@ function createOrchView(id) {
   view.innerHTML =
     '<div class="orch-main"><div class="xterm-host"></div></div>' +
     '<div class="orch-side"><div class="orch-side-head"><span>Agents</span><span class="count"></span></div>' +
-    '<div class="orch-grid"></div></div>';
+    '<div class="orch-plan"></div><div class="orch-grid"></div></div>';
   $('terminals').appendChild(view);
   const entry = createTerminal(id, view.querySelector('.orch-main .xterm-host'));
   entry.el = view;
   entry.grid = view.querySelector('.orch-grid');
+  wirePlanPanel(id, view.querySelector('.orch-plan'));
+  renderPlan(id);
   renderOrch(id);
   return entry;
+}
+
+// ---- Plan panel: goal -> planner -> editable task cards -> Run -> progress ----
+
+const workedAgents = new Set();
+
+function planOf(orchId) {
+  const orch = find(orchId);
+  return (orch && orch.orch.plan) || { phase: 'idle', goal: '', log: [], tasks: [] };
+}
+
+function freeSlots(orchId) {
+  const orch = find(orchId);
+  const running = workersOf(orchId).filter((w) => statusOf(w.id) !== 'stopped').length;
+  return orch.orch.maxAgents - running;
+}
+
+function addTaskCard(panel, task) {
+  const card = document.createElement('div');
+  card.className = 'task-card';
+  card.innerHTML =
+    '<div class="task-head"><input class="task-label" placeholder="Task name">' +
+    `<button class="icon-btn" data-act="remove" title="Remove task" aria-label="Remove task">${ICONS.close}</button></div>` +
+    '<textarea class="task-prompt" rows="4" placeholder="Instructions for this agent"></textarea>';
+  card.querySelector('.task-label').value = task.label || '';
+  card.querySelector('.task-prompt').value = task.prompt || '';
+  panel.querySelector('.plan-tasks').appendChild(card);
+  return card;
+}
+
+function updateRunButton(orchId) {
+  const entry = terms.get(orchId);
+  const panel = entry && entry.el.querySelector('.orch-plan');
+  const button = panel && panel.querySelector('[data-act="run"]');
+  if (!button) {
+    return;
+  }
+  const count = panel.querySelectorAll('.task-card').length;
+  const free = freeSlots(orchId);
+  button.textContent = `Run ${count} ${count === 1 ? 'agent' : 'agents'}`;
+  button.disabled = count === 0 || count > free;
+  panel.querySelector('.plan-note').textContent = count > free ? `Only ${free} agent ${free === 1 ? 'slot is' : 'slots are'} free` : '';
+}
+
+function updatePlanProgress(orchId) {
+  const entry = terms.get(orchId);
+  const label = entry && entry.el.querySelector('.plan-progress');
+  const plan = planOf(orchId);
+  if (!label || plan.phase !== 'running') {
+    return;
+  }
+  // Agents are idle before they pick up their task, so only one seen working counts as done.
+  const done = plan.agentIds.filter((id) => statusOf(id) === 'stopped' || (statusOf(id) === 'idle' && workedAgents.has(id))).length;
+  const waiting = plan.agentIds.filter((id) => statusOf(id) === 'waiting').length;
+  label.textContent = `${done} of ${plan.agentIds.length} done` + (waiting ? ` · ${waiting} need${waiting === 1 ? 's' : ''} input` : '');
+}
+
+function renderPlan(orchId) {
+  const entry = terms.get(orchId);
+  const orch = find(orchId);
+  if (!entry || !entry.grid || !orch) {
+    return;
+  }
+  const panel = entry.el.querySelector('.orch-plan');
+  const plan = planOf(orchId);
+  panel.dataset.phase = plan.phase;
+  const goal = `<span class="plan-goal" title="${esc(plan.goal || '')}">${esc(plan.goal || '')}</span>`;
+  if (plan.phase === 'planning') {
+    panel.innerHTML =
+      `<div class="plan-title"><span class="spinner"></span>Planning${goal}</div>` +
+      `<ol class="plan-log">${plan.log.slice(-8).map((line) => `<li>${esc(line)}</li>`).join('')}</ol>` +
+      '<div class="plan-actions"><span class="spacer"></span><button type="button" class="btn small" data-act="cancel">Cancel</button></div>';
+  } else if (plan.phase === 'review') {
+    panel.innerHTML =
+      `<div class="plan-title">Review the plan${goal}</div><div class="plan-tasks"></div>` +
+      '<div class="plan-actions"><button type="button" class="btn small" data-act="add">Add task</button>' +
+      '<span class="spacer"></span><span class="plan-note"></span>' +
+      '<button type="button" class="btn small" data-act="discard">Discard</button>' +
+      '<button type="button" class="btn small primary" data-act="run">Run</button></div>';
+    for (const task of plan.tasks) {
+      addTaskCard(panel, task);
+    }
+    updateRunButton(orchId);
+  } else if (plan.phase === 'running') {
+    panel.innerHTML = `<div class="plan-title"><span class="spinner"></span>Running${goal}<span class="plan-progress"></span></div>`;
+    updatePlanProgress(orchId);
+  } else {
+    let banner = '';
+    if (plan.phase === 'error') {
+      banner = plan.error;
+    } else if (plan.phase === 'done') {
+      const n = (plan.agentIds || []).length;
+      banner = plan.interrupted
+        ? 'The last run was interrupted when the app closed.'
+        : plan.summarySent
+          ? `Last run: ${n} ${n === 1 ? 'agent' : 'agents'} finished. Their results were sent to the orchestrator.`
+          : `Last run: ${n} ${n === 1 ? 'agent' : 'agents'} finished. The orchestrator was not running, so it did not get their results.`;
+    }
+    panel.innerHTML =
+      (banner ? `<div class="plan-banner ${plan.phase}">${esc(banner)}</div>` : '') +
+      `<textarea class="plan-input" rows="2" placeholder="Describe a goal. A planner splits it into tasks for up to ${orch.orch.maxAgents} agents; you review them before anything runs."></textarea>` +
+      '<div class="plan-actions"><span class="plan-hint">Ctrl+Enter to plan</span><span class="spacer"></span>' +
+      '<button type="button" class="btn small primary" data-act="plan">Plan</button></div>';
+    panel.querySelector('.plan-input').value = plan.phase === 'error' ? plan.goal || '' : '';
+  }
+}
+
+function collectTasks(panel) {
+  return [...panel.querySelectorAll('.task-card')].map((card) => ({
+    label: card.querySelector('.task-label').value.trim(),
+    prompt: card.querySelector('.task-prompt').value.trim()
+  }));
+}
+
+function wirePlanPanel(orchId, panel) {
+  const fail = (e) => alert(e.message.replace(/^.*Error: /, ''));
+  const startPlan = () => {
+    const input = panel.querySelector('.plan-input');
+    if (input && input.value.trim()) {
+      desk.planOrchestration(orchId, input.value).catch(fail);
+    }
+  };
+  panel.addEventListener('click', (e) => {
+    const button = e.target.closest('[data-act]');
+    const act = button ? button.dataset.act : null;
+    if (act === 'plan') {
+      startPlan();
+    } else if (act === 'cancel') {
+      desk.cancelPlan(orchId).catch(fail);
+    } else if (act === 'discard') {
+      desk.discardPlan(orchId).catch(fail);
+    } else if (act === 'run') {
+      desk.runPlan(orchId, collectTasks(panel)).catch(fail);
+    } else if (act === 'add') {
+      addTaskCard(panel, {}).querySelector('.task-label').focus();
+      updateRunButton(orchId);
+    } else if (act === 'remove') {
+      button.closest('.task-card').remove();
+      updateRunButton(orchId);
+    }
+  });
+  panel.addEventListener('keydown', (e) => {
+    if (e.target.classList.contains('plan-input') && e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      startPlan();
+    }
+  });
 }
 
 function addTile(worker) {
@@ -598,7 +747,9 @@ function updateTile(id) {
   head.querySelector('.name').textContent = s.title;
   head.title = s.task || s.title;
   head.querySelector('.state').textContent = STATUS_TEXT[status];
-  head.querySelector('[data-act="power"]').textContent = status === 'stopped' ? 'Resume' : 'Stop';
+  const power = head.querySelector('[data-act="power"]');
+  power.textContent = status === 'stopped' ? 'Starting…' : 'Close';
+  power.title = 'Stop this agent and close its tile. Its conversation is kept in the sidebar.';
 }
 
 // Keeps an orchestration's tiles in step with its workers and their statuses.
@@ -608,20 +759,36 @@ function renderOrch(orchId) {
   if (!entry || !entry.grid || !orch) {
     return;
   }
+  // Only running agents get a tile; a stopped agent stays in the sidebar, where clicking it resumes it.
   const workers = workersOf(orchId);
+  const live = workers.filter((w) => statusOf(w.id) !== 'stopped' || resumingAgents.has(w.id));
   for (const w of workers) {
-    addTile(w);
-    updateTile(w.id);
+    if (live.includes(w)) {
+      addTile(w);
+      updateTile(w.id);
+    } else if (terms.has(w.id)) {
+      disposeTerminal(w.id);
+    }
   }
   const running = workers.filter((w) => statusOf(w.id) !== 'stopped').length;
   entry.el.querySelector('.orch-side-head .count').textContent = `${running} of ${orch.orch.maxAgents} running`;
   const empty = entry.grid.querySelector('.orch-empty');
-  if (!workers.length && !empty) {
-    entry.grid.insertAdjacentHTML('beforeend', '<div class="orch-empty">No agents yet. They appear here as the orchestrator starts them.</div>');
-  } else if (workers.length && empty) {
+  const emptyText = workers.length
+    ? 'No agents running. Finished agents are listed in the sidebar; click one to resume it.'
+    : 'No agents yet. Describe a goal above and run the plan; each task gets an agent here.';
+  if (!live.length && !empty) {
+    entry.grid.insertAdjacentHTML('beforeend', `<div class="orch-empty">${emptyText}</div>`);
+  } else if (!live.length) {
+    empty.textContent = emptyText;
+  } else if (empty) {
     empty.remove();
   }
+  updatePlanProgress(orchId);
+  updateRunButton(orchId);
 }
+
+// Agents being resumed keep their tile until their status turns from stopped to running.
+const resumingAgents = new Set();
 
 function markFocusedTile(id) {
   const entry = terms.get(id);
@@ -644,15 +811,23 @@ function focusTile(id) {
 }
 
 async function toggleWorker(id) {
-  const entry = terms.get(id);
   if (statusOf(id) !== 'stopped') {
     desk.killPty(id);
     return;
   }
+  resumeWorker(id);
+}
+
+async function resumeWorker(id) {
+  resumingAgents.add(id);
+  addTile(find(id));
+  const entry = terms.get(id);
   fitEntry(id);
   const result = await desk.openPty(id, entry.term.cols, entry.term.rows);
   if (result && result.error) {
-    entry.term.write('\x1b[31m' + result.error.replace(/\n/g, '\r\n') + '\x1b[0m\r\n');
+    resumingAgents.delete(id);
+    render();
+    alert(result.error);
   }
 }
 
@@ -671,6 +846,9 @@ async function openSession(id) {
   const owner = s && s.kind === 'worker' ? find(s.orchestratorId) : null;
   if (owner) {
     await openSession(owner.id);
+    if (statusOf(id) === 'stopped') {
+      await resumeWorker(id);
+    }
     focusTile(id);
     return;
   }
@@ -899,7 +1077,11 @@ async function submitModal() {
       return;
     }
     state.sessions.push(session);
-    openSession(session.id);
+    await openSession(session.id);
+    // A goal typed in the form goes straight to the planner.
+    if (modal.mode === 'orch' && $('f-goal').value.trim()) {
+      desk.planOrchestration(session.id, $('f-goal').value).catch((e) => alert(e.message.replace(/^.*Error: /, '')));
+    }
     return;
   }
   const updated = await desk.updateSession({ id: modal.id, title, group });
@@ -964,6 +1146,11 @@ function wireUi() {
     if ($('modal').open) {
       return;
     }
+    // Text fields (the plan box, task cards) keep their own keys; the terminal's hidden textarea does not count.
+    const field = e.target;
+    if ((field.tagName === 'TEXTAREA' || field.tagName === 'INPUT') && !field.classList.contains('xterm-helper-textarea')) {
+      return;
+    }
     const action = shortcutFor(e);
     if (!action) {
       return;
@@ -991,10 +1178,19 @@ function wireDesk() {
     }
   });
   // An orchestrator started an agent: give it a tile before its first output arrives.
+  desk.onPlan(({ id, plan }) => {
+    const orch = find(id);
+    if (orch) {
+      orch.orch.plan = plan;
+      renderPlan(id);
+    }
+  });
   desk.onSessionAdded((session) => {
     if (!find(session.id)) {
       state.sessions.push(session);
     }
+    // Its process starts right after this; until its first status arrives it must not count as stopped.
+    resumingAgents.add(session.id);
     addTile(session);
     render();
     requestAnimationFrame(() => fitActive());
@@ -1007,6 +1203,12 @@ function wireDesk() {
   });
   desk.onStatus(({ id, status }) => {
     state.statuses[id] = status;
+    if (status === 'busy') {
+      workedAgents.add(id);
+    }
+    if (status !== 'stopped') {
+      resumingAgents.delete(id);
+    }
     render();
   });
 }
