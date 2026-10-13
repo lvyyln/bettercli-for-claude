@@ -473,6 +473,8 @@ function registerIpc() {
   ipcMain.handle('orch:cancelPlan', (e, id) => orchestration.cancelPlan(id));
   ipcMain.handle('orch:discardPlan', (e, id) => orchestration.discardPlan(id));
   ipcMain.handle('orch:run', (e, { id, tasks }) => orchestration.runPlan(id, tasks));
+  ipcMain.handle('orch:restart', (e, { id, agentIds }) => orchestration.restartAgents(id, agentIds));
+  ipcMain.handle('orch:dismissRefresh', (e, id) => orchestration.dismissRefresh(id));
   ipcMain.handle('session:import', (e, { id, title, cwd }) =>
     addSession({ id, title, cwd, group: 'Imported', parentId: null }));
   ipcMain.handle('session:update', (e, { id, title, group }) => {

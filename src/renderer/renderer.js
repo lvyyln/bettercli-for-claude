@@ -214,9 +214,9 @@ function makeDraggable(item, s) {
 
 function sessionRow(s, depth) {
   const item = document.createElement('div');
-  item.className = 'item' + (s.id === state.active ? ' selected' : '');
+  item.className = 'item' + (s.id === state.active ? ' selected' : '') + (s.retired ? ' retired' : '');
   item.style.paddingLeft = (8 + depth * 16) + 'px';
-  item.title = s.cwd;
+  item.title = s.retired ? 'Replaced by a fresh agent from a summary. ' + s.cwd : s.cwd;
   makeDraggable(item, s);
   item.innerHTML =
     (depth > 0 ? ICONS.branch : '') +
@@ -551,16 +551,68 @@ function createOrchView(id) {
   view.className = 'term orch-view';
   view.innerHTML =
     '<div class="orch-main"><div class="xterm-host"></div></div>' +
-    '<div class="orch-side"><div class="orch-side-head"><span>Agents</span><span class="count"></span></div>' +
-    '<div class="orch-plan"></div><div class="orch-grid"></div></div>';
+    '<div class="orch-side"><div class="orch-side-head"><span>Agents</span><span class="count"></span>' +
+    '<button type="button" class="btn small" data-act="refresh-agents" title="Summarize the agents with Haiku and continue in fresh agents">Summarize &amp; restart</button></div>' +
+    '<div class="orch-refresh hidden"></div><div class="orch-plan"></div><div class="orch-grid"></div></div>';
   $('terminals').appendChild(view);
   const entry = createTerminal(id, view.querySelector('.orch-main .xterm-host'));
   entry.el = view;
   entry.grid = view.querySelector('.orch-grid');
   wirePlanPanel(id, view.querySelector('.orch-plan'));
+  view.querySelector('[data-act="refresh-agents"]').addEventListener('click', () => openRefreshModal(id));
+  view.querySelector('.orch-refresh').addEventListener('click', (e) => {
+    if (e.target.closest('[data-act="dismiss"]')) {
+      desk.dismissRefresh(id);
+    }
+  });
   renderPlan(id);
+  renderRefresh(id);
   renderOrch(id);
   return entry;
+}
+
+// ---- Summarize & restart ----
+
+let refreshFor = null;
+const REFRESH_STATE = { waiting: 'Waiting', summarizing: 'Summarizing…', done: 'Restarted', error: 'Failed' };
+
+// Pre-ticks the agents from the latest run and any still open; older agents are listed unticked.
+function openRefreshModal(orchId) {
+  const agents = workersOf(orchId).filter((w) => !w.retired);
+  if (!agents.length) {
+    alert('This orchestration has no agents to summarize.');
+    return;
+  }
+  const latest = new Set(planOf(orchId).agentIds || []);
+  const preferred = agents.filter((w) => latest.has(w.id) || statusOf(w.id) !== 'stopped');
+  const ticked = new Set((preferred.length ? preferred : agents).map((w) => w.id));
+  refreshFor = orchId;
+  $('refresh-list').innerHTML = agents.map((w) =>
+    `<label class="check"><input type="checkbox" value="${esc(w.id)}" ${ticked.has(w.id) ? 'checked' : ''}> ` +
+    `${esc(w.title)} <span class="meta">${esc(STATUS_TEXT[statusOf(w.id)])}${w.worktree ? ' · ' + esc(w.worktree.branch) : ''}</span></label>`).join('');
+  $('refresh-modal').showModal();
+}
+
+function renderRefresh(orchId) {
+  const entry = terms.get(orchId);
+  const orch = find(orchId);
+  if (!entry || !entry.grid || !orch) {
+    return;
+  }
+  const panel = entry.el.querySelector('.orch-refresh');
+  const refresh = orch.orch.refresh;
+  panel.classList.toggle('hidden', !refresh);
+  entry.el.querySelector('[data-act="refresh-agents"]').disabled = Boolean(refresh && refresh.phase === 'working');
+  if (!refresh) {
+    return;
+  }
+  const working = refresh.phase === 'working';
+  panel.innerHTML =
+    `<div class="refresh-head">${working ? '<span class="spinner"></span>Summarizing with Haiku' : 'Summarize &amp; restart finished'}` +
+    `<span class="spacer"></span>${working ? '' : '<button type="button" class="btn small" data-act="dismiss">Dismiss</button>'}</div>` +
+    refresh.items.map((item) =>
+      `<div class="refresh-item"><span class="label">${esc(item.label)}</span>` +
+      `<span class="state ${item.state}" title="${esc(item.error || '')}">${REFRESH_STATE[item.state]}${item.error ? ': ' + esc(item.error) : ''}</span></div>`).join('');
 }
 
 // ---- Plan panel: goal -> planner -> editable task cards -> Run -> progress ----
@@ -1112,6 +1164,13 @@ function wireUi() {
   $('btn-new').addEventListener('click', () => openModal('new'));
   $('btn-new-empty').addEventListener('click', () => openModal('new'));
   $('btn-orch').addEventListener('click', () => openModal('orch'));
+  $('refresh-cancel').addEventListener('click', () => $('refresh-modal').close());
+  $('refresh-form').addEventListener('submit', () => {
+    const ids = [...$('refresh-list').querySelectorAll('input:checked')].map((input) => input.value);
+    if (refreshFor && ids.length) {
+      desk.restartAgents(refreshFor, ids).catch((e) => alert(e.message.replace(/^.*Error: /, '')));
+    }
+  });
   $('btn-orch-empty').addEventListener('click', () => openModal('orch'));
   $('f-perm').addEventListener('change', (e) => $('perm-warning').classList.toggle('hidden', e.target.value !== 'bypassPermissions'));
   $('btn-fork').addEventListener('click', () => forkSession(state.active));
@@ -1143,7 +1202,7 @@ function wireUi() {
   $('theme').addEventListener('change', (e) => applyTheme(e.target.value));
   // Capture phase, so shortcuts are handled before xterm sends the keys to Claude.
   window.addEventListener('keydown', (e) => {
-    if ($('modal').open) {
+    if ($('modal').open || $('refresh-modal').open) {
       return;
     }
     // Text fields (the plan box, task cards) keep their own keys; the terminal's hidden textarea does not count.
@@ -1178,6 +1237,20 @@ function wireDesk() {
     }
   });
   // An orchestrator started an agent: give it a tile before its first output arrives.
+  desk.onRefresh(({ id, refresh }) => {
+    const orch = find(id);
+    if (orch) {
+      orch.orch.refresh = refresh;
+      renderRefresh(id);
+    }
+  });
+  desk.onSessionUpdated((session) => {
+    const existing = find(session.id);
+    if (existing) {
+      Object.assign(existing, session);
+      render();
+    }
+  });
   desk.onPlan(({ id, plan }) => {
     const orch = find(id);
     if (orch) {

@@ -126,6 +126,22 @@
   </form>
 </dialog>
 
+<dialog id="refresh-modal">
+  <form id="refresh-form" method="dialog">
+    <h2>Summarize &amp; restart agents</h2>
+    <p class="dialog-text">Use this when the agents' prompt cache has expired, for example after a night. Resuming a
+      long conversation would re-read all of it at full price. Instead, each transcript is condensed (tool output
+      removed), Haiku writes a handoff, and a fresh agent continues from it in the same folder. The old agents are
+      closed and stay in the sidebar.</p>
+    <div id="refresh-list" class="refresh-list"></div>
+    <div class="modal-actions">
+      <span class="spacer"></span>
+      <button type="button" id="refresh-cancel" class="btn">Cancel</button>
+      <button type="submit" id="refresh-start" class="btn primary">Summarize &amp; restart</button>
+    </div>
+  </form>
+</dialog>
+
 <script src="../../node_modules/@xterm/xterm/lib/xterm.js"></script>
 <script src="../../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
 <script src="../../node_modules/@xterm/addon-web-links/lib/addon-web-links.js"></script>

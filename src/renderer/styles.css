@@ -312,6 +312,18 @@ button, input, select { font: inherit; color: inherit; }
 .orch-main .xterm-host { position: absolute; inset: 8px 4px 4px 14px; }
 .orch-side { flex: 1 1 50%; min-width: 0; display: flex; flex-direction: column; }
 .orch-side-head { flex: none; display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 10px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.7px; color: var(--muted); border-bottom: 1px solid var(--border); }
+.orch-side-head .count { flex: 1; }
+.orch-side-head .btn { text-transform: none; letter-spacing: 0; font-weight: 500; }
+.orch-refresh { flex: none; display: flex; flex-direction: column; gap: 4px; padding: 8px; border-bottom: 1px solid var(--border); background: var(--panel); font-size: 12px; }
+.orch-refresh .refresh-head { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.refresh-item { display: flex; align-items: center; gap: 8px; color: var(--muted); min-width: 0; }
+.refresh-item .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.refresh-item .state.done { color: var(--accent); }
+.refresh-item .state.error { color: var(--danger); }
+.dialog-text { margin: 0 0 12px; font-size: 12px; line-height: 1.5; color: var(--muted); }
+.refresh-list { display: flex; flex-direction: column; gap: 6px; max-height: 280px; overflow-y: auto; }
+.refresh-list .check .meta { color: var(--faint); font-size: 11px; }
+.item.retired .name { opacity: 0.5; }
 .orch-plan { flex: none; max-height: 60%; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 8px; border-bottom: 1px solid var(--border); background: var(--panel); }
 .orch-plan textarea, .orch-plan input {
   width: 100%;

@@ -155,7 +155,8 @@ function createWorktree(cwd, label) {
   return { path: path.join(dir, path.relative(root, path.resolve(cwd))), branch };
 }
 
-function spawnAgent(orch, args) {
+// `reuse` ({ cwd, worktree, fields }) continues in an existing folder or worktree instead of making a new one.
+function spawnAgent(orch, args, reuse) {
   const label = String(args.label || '').trim() || 'Agent';
   const task = String(args.task || '').trim();
   if (!task) {
@@ -166,10 +167,10 @@ function spawnAgent(orch, args) {
     throw new Error(`Limit reached: ${running} of ${orch.orch.maxAgents} agents are running. ` +
       'Wait for one to finish and stop it, or reuse one with send_to_agent.');
   }
-  let cwd = orch.cwd;
-  let worktree = null;
+  let cwd = reuse ? reuse.cwd : orch.cwd;
+  let worktree = reuse ? reuse.worktree || null : null;
   let note = null;
-  if (orch.orch.isolation === 'worktree') {
+  if (!reuse && orch.orch.isolation === 'worktree') {
     try {
       worktree = createWorktree(orch.cwd, label);
       cwd = worktree.path;
@@ -178,7 +179,7 @@ function spawnAgent(orch, args) {
       note = 'Could not create a git worktree (' + e.message.split('\n')[0] + '); this agent works in the shared folder.';
     }
   }
-  const session = app.addSession({
+  const session = app.addSession(Object.assign({
     title: label,
     group: orch.group,
     cwd,
@@ -189,7 +190,7 @@ function spawnAgent(orch, args) {
     permissionMode: orch.orch.permissionMode,
     worktree,
     pending: 'new'
-  });
+  }, reuse && reuse.fields));
   // Sent before the pty starts so the page has a terminal ready for the first output.
   app.toRenderer('session:added', session);
   turnStarted.set(session.id, false);
@@ -633,6 +634,209 @@ async function wrapUp(orch, plan) {
   setPlan(orch, { phase: 'done', goal: plan.goal, log: [], tasks: plan.tasks, agentIds: plan.agentIds, summarySent: sent });
 }
 
+// ---- Summarize & restart: after the prompt cache has expired, resuming a long conversation re-reads all of it
+// at full price. Instead, condense each transcript locally, have Haiku write a handoff, and start a fresh agent
+// from that handoff. ----
+
+const SUMMARY_MODEL = 'haiku';
+const CONDENSED_MAX = 120000;
+const CONDENSED_HEAD = 20000;
+const TEXT_MAX = 2000;
+const SUMMARY_PARALLEL = 3;
+
+function stripReminders(text) {
+  return String(text || '').replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
+}
+
+function clip(text, max) {
+  return text.length > max ? text.slice(0, max) + ' […]' : text;
+}
+
+function toolLine(item) {
+  const input = item.input || {};
+  const target = input.file_path || input.notebook_path || input.command || input.pattern || input.path ||
+    input.url || input.description || '';
+  return `  [${item.name}] ${clip(String(target).replace(/\s+/g, ' '), 160)}`;
+}
+
+// Keeps what was said and which tools were used; drops tool results and file contents, which are most of a transcript.
+function condenseTranscript(id) {
+  const file = app.findJsonl(id);
+  if (!file) {
+    return '';
+  }
+  const out = [];
+  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+    if (!line.trim()) {
+      continue;
+    }
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch (e) {
+      continue;
+    }
+    if (entry.isMeta || !entry.message) {
+      continue;
+    }
+    const content = entry.message.content;
+    if (entry.type === 'user') {
+      const texts = typeof content === 'string'
+        ? [content]
+        : (Array.isArray(content) ? content.filter((c) => c.type === 'text').map((c) => c.text) : []);
+      for (const text of texts.map(stripReminders).filter(Boolean)) {
+        out.push('USER: ' + clip(text, TEXT_MAX));
+      }
+    } else if (entry.type === 'assistant' && Array.isArray(content)) {
+      for (const item of content) {
+        if (item.type === 'text' && item.text.trim()) {
+          out.push('AGENT: ' + clip(item.text.trim(), TEXT_MAX));
+        } else if (item.type === 'tool_use') {
+          out.push(toolLine(item));
+        }
+      }
+    }
+  }
+  const text = out.join('\n');
+  if (text.length <= CONDENSED_MAX) {
+    return text;
+  }
+  return text.slice(0, CONDENSED_HEAD) + '\n\n[… middle of the session omitted …]\n\n' +
+    text.slice(text.length - (CONDENSED_MAX - CONDENSED_HEAD));
+}
+
+function runClaudePrint(args, input, cwd) {
+  return new Promise((resolve, reject) => {
+    const file = app.resolveClaude();
+    const viaShell = /\.cmd$/i.test(file);
+    const child = spawn(viaShell ? `"${file}"` : file, viaShell ? args.map((a) => '"' + a.replace(/"/g, '\\"') + '"') : args, {
+      cwd,
+      env: app.claudeEnv(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+      shell: viaShell
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr = (stderr + chunk).slice(-2000); });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      try {
+        const result = JSON.parse(stdout);
+        if (result.is_error || !result.result) {
+          reject(new Error(result.result || 'empty reply'));
+        } else {
+          resolve(result.result);
+        }
+      } catch (e) {
+        reject(new Error(stderr.trim().split('\n').pop() || 'claude exited with code ' + code));
+      }
+    });
+    // The transcript goes through stdin: Windows limits a command line to about 32,000 characters.
+    child.stdin.end(input);
+  });
+}
+
+function summarizeAgent(agent) {
+  const condensed = condenseTranscript(agent.id);
+  if (!condensed) {
+    return Promise.reject(new Error('No transcript found'));
+  }
+  const prompt = [
+    'Below is a condensed transcript of a Claude Code agent session; tool results and file contents were removed.',
+    'Write a handoff for a fresh agent that will continue this work in the same folder. Use these sections:',
+    'Goal; Done so far (name the files); Current state; Problems and open questions; Next steps.',
+    'Be specific and concise, under 400 words. Output only the handoff.',
+    '',
+    `Agent name: ${agent.title}`,
+    `Working folder: ${agent.cwd}` + (agent.worktree ? ` (git worktree, branch ${agent.worktree.branch})` : ''),
+    '',
+    '--- transcript ---',
+    condensed
+  ].join('\n');
+  return runClaudePrint(['-p', '--model', SUMMARY_MODEL, '--tools', '', '--no-session-persistence',
+    '--output-format', 'json'], prompt, agent.cwd);
+}
+
+function handoffPrompt(agent, summary) {
+  const task = agent.originalTask || agent.task || '';
+  return [
+    'You are taking over from a previous agent whose session has ended. Continue its work.',
+    task ? 'Its original task was:\n' + task : '',
+    'Handoff summary of its session:\n' + summary,
+    'First check the current state of the files the summary mentions, then reply with a short status: what is done ' +
+      'and what is left. Then wait for further instructions; do not continue the work until you are asked.'
+  ].filter(Boolean).join('\n\n');
+}
+
+function setRefresh(orch, refresh) {
+  orch.orch.refresh = refresh;
+  app.saveStore();
+  app.toRenderer('orch:refresh', { id: orch.id, refresh });
+}
+
+async function restartAgents(id, agentIds) {
+  const orch = getOrch(id);
+  if (orch.orch.refresh && orch.orch.refresh.phase === 'working') {
+    throw new Error('Already summarizing');
+  }
+  const agents = workersOf(id).filter((s) => (agentIds || []).includes(s.id) && !s.retired);
+  if (!agents.length) {
+    throw new Error('Pick at least one agent');
+  }
+  const refresh = {
+    phase: 'working',
+    items: agents.map((a) => ({ id: a.id, label: a.title, state: 'waiting' }))
+  };
+  setRefresh(orch, refresh);
+  const update = (item, fields) => {
+    Object.assign(item, fields);
+    app.saveStore();
+    app.toRenderer('orch:refresh', { id, refresh });
+  };
+  const queue = agents.slice();
+  const worker = async () => {
+    while (queue.length) {
+      const agent = queue.shift();
+      const item = refresh.items.find((i) => i.id === agent.id);
+      update(item, { state: 'summarizing' });
+      try {
+        const summary = await summarizeAgent(agent);
+        // The handoff replaces the old agent, so its process (if any) is no longer needed.
+        app.killPty(agent.id);
+        const fresh = spawnAgent(orch, { label: agent.title, task: handoffPrompt(agent, summary) }, {
+          cwd: agent.cwd,
+          worktree: agent.worktree,
+          fields: { originalTask: agent.originalTask || agent.task, handoff: summary, replaces: agent.id }
+        });
+        agent.retired = true;
+        agent.replacedBy = fresh.agentId;
+        update(item, { state: 'done', newId: fresh.agentId });
+      } catch (e) {
+        app.log.warn('summarize & restart failed for', agent.id, e.message);
+        update(item, { state: 'error', error: e.message.split('\n')[0] });
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(SUMMARY_PARALLEL, agents.length) }, worker));
+  update(refresh, { phase: 'done' });
+  // Sidebar rows of the replaced agents change, so send the updated sessions.
+  for (const agent of agents) {
+    app.toRenderer('session:updated', agent);
+  }
+  return refresh;
+}
+
+function dismissRefresh(id) {
+  const orch = getOrch(id);
+  if (orch.orch.refresh && orch.orch.refresh.phase !== 'working') {
+    setRefresh(orch, null);
+  }
+}
+
 // Plans that were planning or running when the app closed cannot continue.
 function recoverPlans() {
   for (const s of app.store().sessions) {
@@ -641,6 +845,15 @@ function recoverPlans() {
       s.orch.plan = { phase: 'idle', goal: plan.goal, log: [], tasks: [] };
     } else if (plan && plan.phase === 'running') {
       s.orch.plan = Object.assign({}, plan, { phase: 'done', wrapping: false, interrupted: true });
+    }
+    const refresh = s.kind === 'orchestrator' && s.orch.refresh;
+    if (refresh && refresh.phase === 'working') {
+      for (const item of refresh.items) {
+        if (item.state === 'waiting' || item.state === 'summarizing') {
+          Object.assign(item, { state: 'error', error: 'Interrupted when the app closed' });
+        }
+      }
+      refresh.phase = 'done';
     }
   }
 }
@@ -665,5 +878,5 @@ function normalizeOptions(fields) {
 
 module.exports = {
   init, extraArgs, handleRequest, onStatus, workersOf, normalizeOptions,
-  startPlan, cancelPlan, discardPlan, runPlan, shutdown
+  startPlan, cancelPlan, discardPlan, runPlan, shutdown, restartAgents, dismissRefresh
 };
