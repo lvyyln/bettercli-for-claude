@@ -515,7 +515,10 @@ function registerIpc() {
   ipcMain.handle('changes:open', (e, file) => shell.openPath(file));
   ipcMain.handle('pty:open', (e, { id, cols, rows }) => openPty(id, cols, rows));
   ipcMain.handle('pty:kill', (e, id) => killPty(id));
-  ipcMain.on('pty:write', (e, { id, data }) => writePty(id, data));
+  ipcMain.on('pty:write', (e, { id, data }) => {
+    orchestration.onUserInput(id);
+    writePty(id, data);
+  });
   ipcMain.on('pty:resize', (e, { id, cols, rows }) => {
     const proc = ptys.get(id);
     if (proc) {

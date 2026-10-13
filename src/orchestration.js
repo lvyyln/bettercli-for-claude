@@ -80,7 +80,10 @@ function orchestratorPrompt(session) {
     '4. After spawning, call wait_for_agents, then read their replies. An agent with status "waiting" needs the ' +
       'user (usually a permission prompt): tell the user which agent needs them. Use send_to_agent to follow up.',
     '5. Check the combined result (build or tests where possible), then give the user a short summary of what ' +
-      'each agent did. Stop agents you no longer need.'
+      'each agent did. Stop agents you no longer need.',
+    'When an agent finishes a turn you are not waiting for (for example after the user talked to it directly), ' +
+      'BetterCLI sends you a message starting with "[BetterCLI]" with its reply. Act on it if needed; otherwise ' +
+      'acknowledge it in one short line.'
   ].join('\n');
 }
 
@@ -370,13 +373,119 @@ async function handleRequest(payload) {
 }
 
 function onStatus(id, status) {
+  const previous = lastStatus.get(id);
+  lastStatus.set(id, status);
   if (status === 'busy') {
     turnStarted.set(id, true);
+  }
+  const session = app.findSession(id);
+  if (session && session.kind === 'worker') {
+    if (status === 'busy' && previous !== 'busy') {
+      const entry = lastReplyEntry(id);
+      replyKeyAtStart.set(id, entry ? entry.key : null);
+    } else if (status === 'idle' && previous === 'busy') {
+      queueNotice(session);
+    }
+  } else if (session && session.kind === 'orchestrator' && status === 'idle') {
+    flushNotices(id);
   }
   if (waiters.size) {
     checkWaiters();
   }
   checkRuns();
+}
+
+// ---- Finish notices: tell the orchestrator when an agent finishes a turn it is not already waiting for ----
+
+const lastStatus = new Map();
+// Agent id -> key of its last reply when its current turn started, to tell the new reply from the old one.
+const replyKeyAtStart = new Map();
+const notices = new Map();
+const noticeTimers = new Map();
+const lastUserInput = new Map();
+const NOTICE_BATCH_MS = 3000;
+const TYPING_QUIET_MS = 20000;
+const NOTICE_REPLY_MAX = 1500;
+
+function onUserInput(id) {
+  lastUserInput.set(id, Date.now());
+}
+
+function queueNotice(agent) {
+  const orch = app.findSession(agent.orchestratorId);
+  if (!orch || orch.kind !== 'orchestrator' || agent.retired) {
+    return;
+  }
+  // A running plan reports all its agents together in the wrap-up.
+  const plan = orch.orch.plan;
+  if (plan && plan.phase === 'running' && (plan.agentIds || []).includes(agent.id)) {
+    return;
+  }
+  // wait_for_agents already returns this agent's result.
+  if (Array.from(waiters).some((w) => w.ids.includes(agent.id))) {
+    return;
+  }
+  const list = notices.get(orch.id) || [];
+  if (!list.includes(agent.id)) {
+    list.push(agent.id);
+  }
+  notices.set(orch.id, list);
+  scheduleFlush(orch.id, NOTICE_BATCH_MS);
+}
+
+function scheduleFlush(orchId, delay) {
+  clearTimeout(noticeTimers.get(orchId));
+  noticeTimers.set(orchId, setTimeout(() => flushNotices(orchId), delay));
+}
+
+async function freshReply(id) {
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    const entry = lastReplyEntry(id);
+    if ((entry && entry.key !== replyKeyAtStart.get(id)) || Date.now() > deadline) {
+      return entry ? entry.text : null;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
+// Delivered only while the orchestrator is idle: typing during a permission prompt could answer it,
+// and typing while the user is writing would mix into their message.
+async function flushNotices(orchId) {
+  const ids = notices.get(orchId);
+  if (!ids || !ids.length || !app.isRunning(orchId) || app.statusOf(orchId) !== 'idle') {
+    return;
+  }
+  const sinceTyping = Date.now() - (lastUserInput.get(orchId) || 0);
+  if (sinceTyping < TYPING_QUIET_MS) {
+    scheduleFlush(orchId, TYPING_QUIET_MS - sinceTyping + 500);
+    return;
+  }
+  notices.delete(orchId);
+  const sections = [];
+  for (const id of ids) {
+    const agent = app.findSession(id);
+    if (!agent) {
+      continue;
+    }
+    let reply = await freshReply(id);
+    if (reply && reply.length > NOTICE_REPLY_MAX) {
+      reply = reply.slice(0, NOTICE_REPLY_MAX) + ' […]';
+    }
+    sections.push(`## ${agent.title} (agentId ${agent.id})\n${reply || '(no reply)'}`);
+  }
+  if (!sections.length || app.statusOf(orchId) !== 'idle') {
+    return;
+  }
+  const message = [
+    sections.length === 1 ? '[BetterCLI] An agent finished its turn:' : `[BetterCLI] ${sections.length} agents finished their turns:`,
+    '',
+    sections.join('\n\n'),
+    '',
+    'Use read_agent_output for a full reply. Act on this if it needs anything from you; otherwise answer with one short line.'
+  ].join('\n');
+  app.writePty(orchId, '\x1b[200~' + message + '\x1b[201~');
+  setTimeout(() => app.writePty(orchId, '\r'), 300);
 }
 
 // ---- Plan pipeline: goal -> planner (read-only, headless) -> user reviews tasks -> agents -> wrap-up ----
@@ -878,5 +987,5 @@ function normalizeOptions(fields) {
 
 module.exports = {
   init, extraArgs, handleRequest, onStatus, workersOf, normalizeOptions,
-  startPlan, cancelPlan, discardPlan, runPlan, shutdown, restartAgents, dismissRefresh
+  startPlan, cancelPlan, discardPlan, runPlan, shutdown, restartAgents, dismissRefresh, onUserInput
 };
