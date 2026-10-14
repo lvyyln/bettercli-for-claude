@@ -477,10 +477,13 @@ function registerIpc() {
   ipcMain.handle('orch:dismissRefresh', (e, id) => orchestration.dismissRefresh(id));
   ipcMain.handle('session:import', (e, { id, title, cwd }) =>
     addSession({ id, title, cwd, group: 'Imported', parentId: null }));
-  ipcMain.handle('session:update', (e, { id, title, group }) => {
+  ipcMain.handle('session:update', (e, { id, title, group, maxAgents }) => {
     const session = findSession(id);
     session.title = title;
     session.group = group;
+    if (maxAgents !== undefined && session.kind === 'orchestrator') {
+      orchestration.setMaxAgents(id, maxAgents);
+    }
     saveStore();
     return session;
   });
@@ -516,7 +519,10 @@ function registerIpc() {
   ipcMain.handle('pty:open', (e, { id, cols, rows }) => openPty(id, cols, rows));
   ipcMain.handle('pty:kill', (e, id) => killPty(id));
   ipcMain.on('pty:write', (e, { id, data }) => {
-    orchestration.onUserInput(id);
+    // Escape sequences are mostly xterm's own replies (focus, mouse, cursor reports), not typing.
+    if (!data.startsWith('\x1b')) {
+      orchestration.onUserInput(id);
+    }
     writePty(id, data);
   });
   ipcMain.on('pty:resize', (e, { id, cols, rows }) => {

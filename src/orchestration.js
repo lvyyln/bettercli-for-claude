@@ -386,8 +386,15 @@ function onStatus(id, status) {
     } else if (status === 'idle' && previous === 'busy') {
       queueNotice(session);
     }
-  } else if (session && session.kind === 'orchestrator' && status === 'idle') {
-    flushNotices(id);
+  } else if (session && session.kind === 'orchestrator') {
+    // A fresh pty starts as idle before Claude is at its prompt (it may show the folder-trust or resume
+    // dialog, where a typed Enter picks an option), so only an idle reported by a hook counts.
+    if (status === 'idle' && (previous === 'busy' || previous === 'waiting')) {
+      atPrompt.add(id);
+      flushNotices(id);
+    } else if (status === 'stopped') {
+      atPrompt.delete(id);
+    }
   }
   if (waiters.size) {
     checkWaiters();
@@ -403,6 +410,10 @@ const replyKeyAtStart = new Map();
 const notices = new Map();
 const noticeTimers = new Map();
 const lastUserInput = new Map();
+// Orchestrators that have finished a turn since their pty started, so they are known to be at the prompt.
+const atPrompt = new Set();
+// Orchestrator id -> other notices (e.g. a changed agent limit), delivered with the next flush.
+const notes = new Map();
 const NOTICE_BATCH_MS = 3000;
 const TYPING_QUIET_MS = 20000;
 const NOTICE_REPLY_MAX = 1500;
@@ -452,8 +463,10 @@ async function freshReply(id) {
 // Delivered only while the orchestrator is idle: typing during a permission prompt could answer it,
 // and typing while the user is writing would mix into their message.
 async function flushNotices(orchId) {
-  const ids = notices.get(orchId);
-  if (!ids || !ids.length || !app.isRunning(orchId) || app.statusOf(orchId) !== 'idle') {
+  const ids = notices.get(orchId) || [];
+  const pendingNotes = notes.get(orchId) || [];
+  if ((!ids.length && !pendingNotes.length) || !app.isRunning(orchId) || app.statusOf(orchId) !== 'idle' ||
+    !atPrompt.has(orchId)) {
     return;
   }
   const sinceTyping = Date.now() - (lastUserInput.get(orchId) || 0);
@@ -462,6 +475,7 @@ async function flushNotices(orchId) {
     return;
   }
   notices.delete(orchId);
+  notes.delete(orchId);
   const sections = [];
   for (const id of ids) {
     const agent = app.findSession(id);
@@ -474,18 +488,54 @@ async function flushNotices(orchId) {
     }
     sections.push(`## ${agent.title} (agentId ${agent.id})\n${reply || '(no reply)'}`);
   }
-  if (!sections.length || app.statusOf(orchId) !== 'idle') {
+  if ((!sections.length && !pendingNotes.length) || app.statusOf(orchId) !== 'idle') {
     return;
   }
-  const message = [
+  const lines = pendingNotes.map((note) => `[BetterCLI] ${note}`);
+  if (!sections.length) {
+    sendNotice(orchId, lines.concat('Answer with one short line.').join('\n'));
+    return;
+  }
+  if (lines.length) {
+    lines.push('');
+  }
+  const message = lines.concat([
     sections.length === 1 ? '[BetterCLI] An agent finished its turn:' : `[BetterCLI] ${sections.length} agents finished their turns:`,
     '',
     sections.join('\n\n'),
     '',
     'Use read_agent_output for a full reply. Act on this if it needs anything from you; otherwise answer with one short line.'
-  ].join('\n');
+  ]).join('\n');
+  sendNotice(orchId, message);
+}
+
+function sendNotice(orchId, message) {
   app.writePty(orchId, '\x1b[200~' + message + '\x1b[201~');
   setTimeout(() => app.writePty(orchId, '\r'), 300);
+}
+
+function queueNote(orchId, note) {
+  notes.set(orchId, (notes.get(orchId) || []).concat(note));
+  scheduleFlush(orchId, NOTICE_BATCH_MS);
+}
+
+// The limit only gates new agents; agents already running above a lowered limit keep running.
+function setMaxAgents(orchId, value) {
+  const orch = app.findSession(orchId);
+  if (!orch || orch.kind !== 'orchestrator') {
+    throw new Error('Not an orchestration');
+  }
+  const maxAgents = clampMax(value);
+  if (maxAgents === orch.orch.maxAgents) {
+    return orch;
+  }
+  orch.orch.maxAgents = maxAgents;
+  app.saveStore();
+  // A restarted orchestrator reads the new limit from its system prompt; a running one has to be told.
+  if (app.isRunning(orchId)) {
+    queueNote(orchId, `The user changed the agent limit: at most ${maxAgents} agents can now run at the same time.`);
+  }
+  return orch;
 }
 
 // ---- Plan pipeline: goal -> planner (read-only, headless) -> user reviews tasks -> agents -> wrap-up ----
@@ -974,8 +1024,12 @@ function shutdown() {
   planners.clear();
 }
 
+function clampMax(value) {
+  return Math.min(10, Math.max(1, Math.round(Number(value) || 5)));
+}
+
 function normalizeOptions(fields) {
-  const maxAgents = Math.min(10, Math.max(1, Math.round(Number(fields.maxAgents) || 5)));
+  const maxAgents = clampMax(fields.maxAgents);
   return {
     goal: String(fields.goal || '').trim(),
     maxAgents,
@@ -987,5 +1041,5 @@ function normalizeOptions(fields) {
 
 module.exports = {
   init, extraArgs, handleRequest, onStatus, workersOf, normalizeOptions,
-  startPlan, cancelPlan, discardPlan, runPlan, shutdown, restartAgents, dismissRefresh, onUserInput
+  startPlan, cancelPlan, discardPlan, runPlan, shutdown, restartAgents, dismissRefresh, onUserInput, setMaxAgents
 };

@@ -713,11 +713,15 @@ function renderPlan(orchId) {
     }
     panel.innerHTML =
       (banner ? `<div class="plan-banner ${plan.phase}">${esc(banner)}</div>` : '') +
-      `<textarea class="plan-input" rows="2" placeholder="Describe a goal. A planner splits it into tasks for up to ${orch.orch.maxAgents} agents; you review them before anything runs."></textarea>` +
+      `<textarea class="plan-input" rows="2" placeholder="${esc(planPlaceholder(orch))}"></textarea>` +
       '<div class="plan-actions"><span class="plan-hint">Ctrl+Enter to plan</span><span class="spacer"></span>' +
       '<button type="button" class="btn small primary" data-act="plan">Plan</button></div>';
     panel.querySelector('.plan-input').value = plan.phase === 'error' ? plan.goal || '' : '';
   }
+}
+
+function planPlaceholder(orch) {
+  return `Describe a goal. A planner splits it into tasks for up to ${orch.orch.maxAgents} agents; you review them before anything runs.`;
 }
 
 function collectTasks(panel) {
@@ -824,6 +828,10 @@ function renderOrch(orchId) {
   }
   const running = workers.filter((w) => statusOf(w.id) !== 'stopped').length;
   entry.el.querySelector('.orch-side-head .count').textContent = `${running} of ${orch.orch.maxAgents} running`;
+  const planInput = entry.el.querySelector('.plan-input');
+  if (planInput) {
+    planInput.placeholder = planPlaceholder(orch);
+  }
   const empty = entry.grid.querySelector('.orch-empty');
   const emptyText = workers.length
     ? 'No agents running. Finished agents are listed in the sidebar; click one to resume it.'
@@ -1086,21 +1094,30 @@ function openModal(mode, id, group) {
   const inGroup = group ? state.sessions.filter((x) => x.group === group) : [];
   const s = id ? find(id) : inGroup[inGroup.length - 1] || find(state.active);
   const creating = mode !== 'edit';
-  $('modal-title').textContent = mode === 'orch' ? 'New orchestration' : creating ? 'New session' : 'Edit session';
+  $('modal-title').textContent = mode === 'orch' ? 'New orchestration' : creating ? 'New session'
+    : s.kind === 'orchestrator' ? 'Edit orchestration' : 'Edit session';
   $('f-title').value = creating ? '' : s.title;
   $('f-group').value = group || (s ? s.group : 'Scratch');
   $('f-cwd').value = s ? s.cwd : '';
   $('f-cwd').required = creating;
   $('cwd-row').classList.toggle('hidden', !creating);
   $('btn-remove').classList.toggle('hidden', creating);
-  $('orch-fields').classList.toggle('hidden', mode !== 'orch');
+  // Editing an orchestration only offers the agent limit; the other options are fixed once agents exist.
+  const editingOrch = mode === 'edit' && s.kind === 'orchestrator';
+  $('orch-fields').classList.toggle('hidden', mode !== 'orch' && !editingOrch);
+  for (const el of document.querySelectorAll('.orch-new-only')) {
+    el.classList.toggle('hidden', editingOrch);
+  }
+  $('perm-warning').classList.add('hidden');
+  if (editingOrch) {
+    $('f-max').value = String(s.orch.maxAgents);
+  }
   if (mode === 'orch') {
     $('f-goal').value = '';
     $('f-max').value = '5';
     $('f-isolation').value = 'shared';
     $('f-perm').value = 'manual';
     $('f-autoapprove').checked = false;
-    $('perm-warning').classList.add('hidden');
   }
   $('modal').showModal();
   $('f-title').focus();
@@ -1136,7 +1153,11 @@ async function submitModal() {
     }
     return;
   }
-  const updated = await desk.updateSession({ id: modal.id, title, group });
+  const fields = { id: modal.id, title, group };
+  if (find(modal.id).kind === 'orchestrator') {
+    fields.maxAgents = Number($('f-max').value);
+  }
+  const updated = await desk.updateSession(fields);
   Object.assign(find(modal.id), updated);
   render();
 }

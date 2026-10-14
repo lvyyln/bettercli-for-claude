@@ -94,19 +94,19 @@
       <span class="row"><input id="f-cwd"><button type="button" id="btn-browse" class="btn">Browse</button></span>
     </label>
     <div id="orch-fields" class="hidden">
-      <label class="field">Goal <span class="hint">optional; a planner splits it into tasks you review before anything runs</span>
+      <label class="field orch-new-only">Goal <span class="hint">optional; a planner splits it into tasks you review before anything runs</span>
         <textarea id="f-goal" rows="3" placeholder="What should the agents get done?"></textarea>
       </label>
       <div class="row">
         <label class="field grow">Max agents at once<input id="f-max" type="number" min="1" max="10" value="5"></label>
-        <label class="field grow">Agents work in
+        <label class="field grow orch-new-only">Agents work in
           <select id="f-isolation">
             <option value="shared">The same folder</option>
             <option value="worktree">Own git worktree each</option>
           </select>
         </label>
       </div>
-      <label class="field">Agent permissions
+      <label class="field orch-new-only">Agent permissions
         <select id="f-perm">
           <option value="manual">Ask me (default)</option>
           <option value="acceptEdits">Allow file edits, ask for the rest</option>
@@ -115,7 +115,7 @@
         </select>
       </label>
       <div id="perm-warning" class="warning hidden">Agents will edit files and run any command without asking you. Use only in a folder you can afford to lose.</div>
-      <label class="check"><input id="f-autoapprove" type="checkbox"> Let the orchestrator start, message and stop agents without asking me</label>
+      <label class="check orch-new-only"><input id="f-autoapprove" type="checkbox"> Let the orchestrator start, message and stop agents without asking me</label>
     </div>
     <div class="modal-actions">
       <button type="button" id="btn-remove" class="btn danger">Remove from desk</button>
