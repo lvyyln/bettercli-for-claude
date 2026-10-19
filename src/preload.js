@@ -9,6 +9,8 @@ contextBridge.exposeInMainWorld('desk', {
   importSession: (fields) => ipcRenderer.invoke('session:import', fields),
   updateSession: (fields) => ipcRenderer.invoke('session:update', fields),
   removeSession: (id) => ipcRenderer.invoke('session:remove', id),
+  removeSessions: (ids) => ipcRenderer.invoke('session:removeMany', ids),
+  getActivity: () => ipcRenderer.invoke('session:activity'),
   reorderSessions: (ids) => ipcRenderer.invoke('session:reorder', ids),
   createOrchestration: (fields) => ipcRenderer.invoke('orch:create', fields),
   onSessionAdded: (cb) => ipcRenderer.on('session:added', (e, session) => cb(session)),

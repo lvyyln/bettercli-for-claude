@@ -433,6 +433,24 @@ async function listHistory() {
   return result;
 }
 
+// Takes a session off the desk only; its Claude transcript stays, so it is listed under Claude CLI sessions again.
+function removeFromDesk(id) {
+  killPty(id);
+  // Workers outlive their orchestrator as ordinary sessions, but stop with it.
+  if (findSession(id).kind === 'orchestrator') {
+    for (const worker of orchestration.workersOf(id)) {
+      killPty(worker.id);
+    }
+  }
+  for (const s of store.sessions) {
+    if (s.parentId === id) {
+      s.parentId = findSession(id).parentId;
+    }
+  }
+  store.sessions = store.sessions.filter((s) => s.id !== id);
+  changes.remove(id);
+}
+
 function addSession(fields) {
   const session = Object.assign({ id: crypto.randomUUID(), createdAt: new Date().toISOString() }, fields);
   store.sessions.push(session);
@@ -497,21 +515,25 @@ function registerIpc() {
     saveStore();
   });
   ipcMain.handle('session:remove', (e, id) => {
-    killPty(id);
-    // Workers outlive their orchestrator as ordinary sessions, but stop with it.
-    if (findSession(id).kind === 'orchestrator') {
-      for (const worker of orchestration.workersOf(id)) {
-        killPty(worker.id);
-      }
-    }
-    for (const s of store.sessions) {
-      if (s.parentId === id) {
-        s.parentId = findSession(id).parentId;
-      }
-    }
-    store.sessions = store.sessions.filter((s) => s.id !== id);
+    removeFromDesk(id);
     saveStore();
-    changes.remove(id);
+  });
+  ipcMain.handle('session:removeMany', (e, ids) => {
+    for (const id of ids) {
+      if (findSession(id)) {
+        removeFromDesk(id);
+      }
+    }
+    saveStore();
+  });
+  // When each session was last used: its transcript's last write, or when it was added if it has none yet.
+  ipcMain.handle('session:activity', () => {
+    const activity = {};
+    for (const s of store.sessions) {
+      const file = findJsonl(s.id);
+      activity[s.id] = file ? fs.statSync(file).mtimeMs : Date.parse(s.createdAt) || 0;
+    }
+    return activity;
   });
   ipcMain.handle('changes:list', (e, id) => changes.list(id, findSession(id).cwd));
   ipcMain.handle('changes:diff', (e, { id, file }) => changes.diffFile(id, findSession(id).cwd, file));

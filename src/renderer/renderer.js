@@ -1181,6 +1181,124 @@ async function removeSession(id) {
   }
 }
 
+// Same as removeSession for many at once, with one re-render and at most one tab switch.
+async function removeSessions(ids) {
+  await desk.removeSessions(ids);
+  const gone = new Set(ids);
+  for (const id of ids) {
+    const removed = find(id);
+    for (const s of state.sessions) {
+      if (s.parentId === id) {
+        s.parentId = removed.parentId;
+      }
+    }
+    state.sessions = state.sessions.filter((s) => s.id !== id);
+    if (terms.has(id)) {
+      disposeTerminal(id);
+    }
+  }
+  state.open = state.open.filter((id) => !gone.has(id));
+  if (gone.has(state.active)) {
+    state.active = state.open[state.open.length - 1] || null;
+  }
+  if (state.active) {
+    openSession(state.active);
+  } else {
+    desk.setActive(null);
+    refreshChanges();
+    render();
+  }
+  if (state.historyLoaded) {
+    loadHistory();
+  }
+}
+
+// ---- Clean up: take many sessions off the sidebar at once; their transcripts stay in Claude Code ----
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+let cleanupActivity = {};
+
+async function openCleanupModal() {
+  if (!state.sessions.length) {
+    alert('The sidebar is already empty.');
+    return;
+  }
+  cleanupActivity = await desk.getActivity();
+  const groups = new Map();
+  for (const s of state.sessions) {
+    if (!groups.has(s.group)) {
+      groups.set(s.group, []);
+    }
+    groups.get(s.group).push(s);
+  }
+  $('cleanup-list').innerHTML = [...groups].map(([group, members]) =>
+    `<div class="cleanup-group"><label class="check cleanup-group-head"><input type="checkbox" data-group="${esc(group)}"> ` +
+    `<span class="label">${esc(group)}</span><span class="meta">${members.length}</span></label>` +
+    members.map((s) => {
+      const running = statusOf(s.id) !== 'stopped';
+      const used = cleanupActivity[s.id];
+      return `<label class="check cleanup-row"><input type="checkbox" value="${esc(s.id)}"> ${dot(s.id)}` +
+        `<span class="name">${esc(s.title)}</span>` +
+        `<span class="meta">${running ? 'running, will be closed · ' : ''}${!used ? 'never used' : Date.now() - used < 60000 ? 'just now' : timeAgo(used) + ' ago'}</span></label>`;
+    }).join('') + '</div>').join('');
+  selectUnused();
+  $('cleanup-modal').showModal();
+}
+
+// Ticks sessions not used for the given number of days; running ones are never ticked automatically.
+function selectUnused() {
+  const days = Math.max(0, Number($('cleanup-days').value) || 0);
+  const cutoff = Date.now() - days * DAY_MS;
+  for (const input of $('cleanup-list').querySelectorAll('input[value]')) {
+    input.checked = statusOf(input.value) === 'stopped' && (cleanupActivity[input.value] || 0) <= cutoff;
+  }
+  updateCleanup();
+}
+
+function updateCleanup() {
+  for (const head of $('cleanup-list').querySelectorAll('input[data-group]')) {
+    const rows = [...head.closest('.cleanup-group').querySelectorAll('input[value]')];
+    const ticked = rows.filter((r) => r.checked).length;
+    head.checked = ticked === rows.length;
+    head.indeterminate = ticked > 0 && ticked < rows.length;
+  }
+  const count = $('cleanup-list').querySelectorAll('input[value]:checked').length;
+  $('cleanup-start').disabled = !count;
+  $('cleanup-start').textContent = count ? `Remove ${count} from sidebar` : 'Remove from sidebar';
+}
+
+function wireCleanup() {
+  $('btn-cleanup').addEventListener('click', () => openCleanupModal());
+  $('cleanup-select').addEventListener('click', () => selectUnused());
+  $('cleanup-days').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      selectUnused();
+    }
+  });
+  $('cleanup-none').addEventListener('click', () => {
+    for (const input of $('cleanup-list').querySelectorAll('input[value]')) {
+      input.checked = false;
+    }
+    updateCleanup();
+  });
+  $('cleanup-list').addEventListener('change', (e) => {
+    if (e.target.dataset.group !== undefined) {
+      for (const input of e.target.closest('.cleanup-group').querySelectorAll('input[value]')) {
+        input.checked = e.target.checked;
+      }
+    }
+    updateCleanup();
+  });
+  $('cleanup-cancel').addEventListener('click', () => $('cleanup-modal').close());
+  $('cleanup-form').addEventListener('submit', () => {
+    const ids = [...$('cleanup-list').querySelectorAll('input[value]:checked')].map((input) => input.value);
+    if (ids.length) {
+      removeSessions(ids).catch((e) => alert(e.message.replace(/^.*Error: /, '')));
+    }
+  });
+}
+
 function wireUi() {
   $('btn-new').addEventListener('click', () => openModal('new'));
   $('btn-new-empty').addEventListener('click', () => openModal('new'));
@@ -1223,7 +1341,7 @@ function wireUi() {
   $('theme').addEventListener('change', (e) => applyTheme(e.target.value));
   // Capture phase, so shortcuts are handled before xterm sends the keys to Claude.
   window.addEventListener('keydown', (e) => {
-    if ($('modal').open || $('refresh-modal').open) {
+    if ($('modal').open || $('refresh-modal').open || $('cleanup-modal').open) {
       return;
     }
     // Text fields (the plan box, task cards) keep their own keys; the terminal's hidden textarea does not count.
@@ -1310,6 +1428,7 @@ function wireDesk() {
 async function init() {
   document.body.classList.add('platform-' + desk.platform);
   wireUi();
+  wireCleanup();
   wireDesk();
   applyTheme(readSetting('theme', 'midnight'));
   state.fontSize = Number(readSetting('fontSize', String(FONT_DEFAULT))) || FONT_DEFAULT;
