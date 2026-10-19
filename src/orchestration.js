@@ -6,8 +6,10 @@ const crypto = require('crypto');
 const { execFileSync, spawn } = require('child_process');
 
 const TOKEN = crypto.randomBytes(24).toString('hex');
-const WAIT_DEFAULT = 300;
-const WAIT_MAX = 1800;
+// Claude Code moves an MCP call that runs past 120 s to the background, where its result may never reach the
+// orchestrator, so a wait always returns before that. Finish notices cover longer work.
+const WAIT_DEFAULT = 100;
+const WAIT_MAX = 100;
 const REPLY_MAX = 6000;
 const PERMISSION_MODES = ['manual', 'acceptEdits', 'auto', 'bypassPermissions'];
 
@@ -77,13 +79,15 @@ function orchestratorPrompt(session) {
     '2. Workers start with no knowledge of this conversation. Give each a complete, self-contained task: the ' +
       'context, exactly what it owns, constraints, and what to report when done.',
     '3. ' + isolation,
-    '4. After spawning, call wait_for_agents, then read their replies. An agent with status "waiting" needs the ' +
-      'user (usually a permission prompt): tell the user which agent needs them. Use send_to_agent to follow up.',
-    '5. Check the combined result (build or tests where possible), then give the user a short summary of what ' +
-      'each agent did. Stop agents you no longer need.',
-    'When an agent finishes a turn you are not waiting for (for example after the user talked to it directly), ' +
-      'BetterCLI sends you a message starting with "[BetterCLI]" with its reply. Act on it if needed; otherwise ' +
-      'acknowledge it in one short line.'
+    '4. After spawning, end your turn with a short note on what is running. Whenever an agent finishes a turn, ' +
+      'BetterCLI sends you a message starting with "[BetterCLI]" with its reply, also when the user talked to ' +
+      'the agent directly. wait_for_agents returns within 100 seconds; use it only for short tasks. An agent ' +
+      'with status "waiting" needs the user (usually a permission prompt): tell the user which agent needs them. ' +
+      'Use send_to_agent to follow up.',
+    '5. As soon as an agent has no more work from you, call stop_agent for it: that closes it and removes it ' +
+      'from the sidebar, so finished agents do not pile up. Its conversation is kept.',
+    '6. When all the work is in, check the combined result (build or tests where possible), then give the user ' +
+      'a short summary of what each agent did.'
   ].join('\n');
 }
 
@@ -263,7 +267,9 @@ async function report(ids) {
     const agents = ids.map((id) => {
       const entry = lastReplyEntry(id);
       const fresh = Boolean(entry) && entry.key !== staleReply.get(id);
-      const info = agentInfo(app.findSession(id));
+      // An agent closed with stop_agent while this wait was open is no longer on the desk.
+      const session = app.findSession(id);
+      const info = session ? agentInfo(session) : { agentId: id, status: 'removed' };
       if (info.status === 'idle' && !fresh) {
         waiting = true;
       }
@@ -293,9 +299,12 @@ function waitForAgents(orch, args) {
     waiter.done = async (timedOut) => {
       waiters.delete(waiter);
       clearTimeout(waiter.timer);
+      // This result already carries their replies, so a separate finish notice would repeat them.
+      dropNotices(orch.id, ids.filter(finished));
       const result = { agents: await report(ids) };
       if (timedOut) {
-        result.note = `Timed out after ${seconds}s; agents that are still busy keep working. Call wait_for_agents again.`;
+        result.note = `Returned after ${seconds}s; agents that are still busy keep working. Do not keep calling ` +
+          'wait_for_agents for long work: end your turn, and BetterCLI will message you as each agent finishes.';
       }
       resolve(result);
     };
@@ -332,13 +341,19 @@ function sendToAgent(orch, args) {
   return { sent: true, agent: agentInfo(agent) };
 }
 
+// Finished agents are closed and taken off the sidebar so they do not pile up; keep: true only stops the process.
 function stopAgent(orch, args) {
   const agent = workersOf(orch.id).find((s) => s.id === args.agentId);
   if (!agent) {
     throw new Error('No agent with id ' + args.agentId + ' in this orchestration.');
   }
-  app.killPty(agent.id);
-  return { stopped: true, agentId: agent.id };
+  dropNotices(orch.id, [agent.id]);
+  if (args.keep === true) {
+    app.killPty(agent.id);
+    return { stopped: true, removed: false, agentId: agent.id };
+  }
+  app.removeSessions([agent.id]);
+  return { stopped: true, removed: true, agentId: agent.id };
 }
 
 // Handles a tool call forwarded by orchestrator-mcp.js. Returns { result } or { error }.
@@ -432,16 +447,23 @@ function queueNotice(agent) {
   if (plan && plan.phase === 'running' && (plan.agentIds || []).includes(agent.id)) {
     return;
   }
-  // wait_for_agents already returns this agent's result.
-  if (Array.from(waiters).some((w) => w.ids.includes(agent.id))) {
-    return;
-  }
+  // Queued even while a wait_for_agents covers this agent: notices go out only once the orchestrator is idle,
+  // and a wait that returns first drops them (dropNotices).
   const list = notices.get(orch.id) || [];
   if (!list.includes(agent.id)) {
     list.push(agent.id);
   }
   notices.set(orch.id, list);
   scheduleFlush(orch.id, NOTICE_BATCH_MS);
+}
+
+function dropNotices(orchId, ids) {
+  const list = (notices.get(orchId) || []).filter((id) => !ids.includes(id));
+  if (list.length) {
+    notices.set(orchId, list);
+  } else {
+    notices.delete(orchId);
+  }
 }
 
 function scheduleFlush(orchId, delay) {
@@ -504,7 +526,9 @@ async function flushNotices(orchId) {
     '',
     sections.join('\n\n'),
     '',
-    'Use read_agent_output for a full reply. Act on this if it needs anything from you; otherwise answer with one short line.'
+    'Use read_agent_output for a full reply. Act on it if needed. Then, for each agent above that has no more ' +
+      'work from you, call stop_agent: it closes the agent and removes it from the sidebar (its conversation is ' +
+      'kept). Keep an agent only if you are about to send it follow-up work. Answer the user in one short line.'
   ]).join('\n');
   sendNotice(orchId, message);
 }
@@ -781,14 +805,18 @@ async function wrapUp(orch, plan) {
   ].join('\n');
   const sent = app.isRunning(orch.id);
   if (sent) {
-    const closing = '\n\nThese agents have now been closed to free resources; their conversations are kept. ' +
-      'For follow-up work, start new agents with spawn_agent.';
+    const closing = '\n\nThese agents have now been closed and removed from the sidebar; their conversations are ' +
+      'kept. For follow-up work, start new agents with spawn_agent.';
     app.writePty(orch.id, '\x1b[200~' + message + closing + '\x1b[201~');
     setTimeout(() => app.writePty(orch.id, '\r'), 300);
-  }
-  // Their results are collected, so the finished agents' processes are no longer needed.
-  for (const id of plan.agentIds) {
-    app.killPty(id);
+    // Their results are with the orchestrator now, so the agents themselves are no longer needed.
+    dropNotices(orch.id, plan.agentIds);
+    app.removeSessions(plan.agentIds);
+  } else {
+    // Nobody received the results, so the agents stay in the sidebar where the user can read them.
+    for (const id of plan.agentIds) {
+      app.killPty(id);
+    }
   }
   setPlan(orch, { phase: 'done', goal: plan.goal, log: [], tasks: plan.tasks, agentIds: plan.agentIds, summarySent: sent });
 }

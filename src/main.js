@@ -618,6 +618,15 @@ app.whenReady().then(async () => {
     openPty,
     killPty,
     writePty,
+    // Closes agents and takes them off the sidebar; their transcripts stay in Claude Code.
+    removeSessions: (ids) => {
+      const gone = ids.filter((id) => findSession(id));
+      for (const id of gone) {
+        removeFromDesk(id);
+      }
+      saveStore();
+      toRenderer('session:removed', gone);
+    },
     isRunning: (id) => ptys.has(id),
     statusOf: (id) => statuses.get(id) || 'stopped',
     toRenderer,

@@ -31,12 +31,13 @@ const TOOLS = [
   {
     name: 'wait_for_agents',
     description: 'Block until the given agents (default: all running ones) have finished their turn, stopped, ' +
-      'or need the user\'s input, or until the timeout. Returns each agent\'s status and last reply.',
+      'or need the user\'s input, or until the timeout (at most 100 seconds). Returns each agent\'s status and ' +
+      'last reply. For longer work, end your turn instead: BetterCLI messages you when each agent finishes.',
     inputSchema: {
       type: 'object',
       properties: {
         agentIds: { type: 'array', items: { type: 'string' } },
-        timeoutSeconds: { type: 'number', description: 'Default 300, maximum 1800.' }
+        timeoutSeconds: { type: 'number', description: 'Default and maximum 100.' }
       }
     }
   },
@@ -60,10 +61,11 @@ const TOOLS = [
   },
   {
     name: 'stop_agent',
-    description: 'Stop an agent\'s process. Its conversation is kept and the user can resume it.',
+    description: 'Close an agent you have no more work for and remove it from the sidebar. Its conversation ' +
+      'is kept in Claude Code. Pass keep: true to only stop its process and leave it in the sidebar.',
     inputSchema: {
       type: 'object',
-      properties: { agentId: { type: 'string' } },
+      properties: { agentId: { type: 'string' }, keep: { type: 'boolean' } },
       required: ['agentId']
     }
   }

@@ -1184,6 +1184,15 @@ async function removeSession(id) {
 // Same as removeSession for many at once, with one re-render and at most one tab switch.
 async function removeSessions(ids) {
   await desk.removeSessions(ids);
+  forgetSessions(ids);
+}
+
+// Drops sessions the main process has already removed (by the user, or an orchestrator closing finished agents).
+function forgetSessions(ids) {
+  ids = ids.filter((id) => find(id));
+  if (!ids.length) {
+    return;
+  }
   const gone = new Set(ids);
   for (const id of ids) {
     const removed = find(id);
@@ -1198,10 +1207,14 @@ async function removeSessions(ids) {
     }
   }
   state.open = state.open.filter((id) => !gone.has(id));
-  if (gone.has(state.active)) {
+  const activeGone = gone.has(state.active);
+  if (activeGone) {
     state.active = state.open[state.open.length - 1] || null;
   }
-  if (state.active) {
+  // Leave focus alone unless the active session went: an orchestrator closing agents can happen mid-typing.
+  if (state.active && !activeGone) {
+    render();
+  } else if (state.active) {
     openSession(state.active);
   } else {
     desk.setActive(null);
@@ -1383,6 +1396,7 @@ function wireDesk() {
       renderRefresh(id);
     }
   });
+  desk.onSessionRemoved((ids) => forgetSessions(ids));
   desk.onSessionUpdated((session) => {
     const existing = find(session.id);
     if (existing) {

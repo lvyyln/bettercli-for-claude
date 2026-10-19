@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('desk', {
   restartAgents: (id, agentIds) => ipcRenderer.invoke('orch:restart', { id, agentIds }),
   dismissRefresh: (id) => ipcRenderer.invoke('orch:dismissRefresh', id),
   onRefresh: (cb) => ipcRenderer.on('orch:refresh', (e, msg) => cb(msg)),
+  onSessionRemoved: (cb) => ipcRenderer.on('session:removed', (e, ids) => cb(ids)),
   onSessionUpdated: (cb) => ipcRenderer.on('session:updated', (e, session) => cb(session)),
   openPty: (id, cols, rows) => ipcRenderer.invoke('pty:open', { id, cols, rows }),
   killPty: (id) => ipcRenderer.invoke('pty:kill', id),
