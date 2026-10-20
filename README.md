@@ -9,7 +9,8 @@ Every tab is the real `claude` terminal UI, so slash commands, skills, MCP serve
 
 ## Features
 
-- **Session tree**: group sessions by task; forks appear as children of their parent.
+- **Session tree**: group sessions by task; forks appear as children of their parent. Each row shows when the session was last used.
+- **Search**: type in the box above the sidebar, or press Ctrl+Shift+P (⌘P), to find a session by title, group or folder. Arrow keys pick, Enter opens.
 - **Fork**: start a new session that carries the full history of an existing one. The parent is not touched.
 - **Live status**: each session shows whether Claude is working, waiting for you (permission prompt), or idle.
 - **Notifications**: a desktop notification (and a flashing taskbar icon) when a session you are not looking at needs input or finishes. Click it to jump to that tab.
@@ -42,10 +43,13 @@ Download from the [latest release](https://github.com/lvyyln/bettercli-for-claud
 ## Usage
 
 - **New session**: `+` in the sidebar. Pick a title, a group and a working directory.
-- **Fork**: hover a session and click the fork icon, or use *Fork* in the header.
+- **Fork**: hover a session and click the fork icon, or use *Fork* in the status bar.
+- **Right-click** a session, tab or group for more: rename, open its folder, copy its ID or a `claude --resume` command for a normal terminal, close other tabs, rename or merge a group.
+- **Settings** (bottom of the sidebar): theme, Clean up sidebar, and the logs folder.
 - **Reorder**: drag a session up or down in the sidebar. It can move among sessions at the same level of its group; forks move with their parent.
 - **Edit**: rename, move to another group, or remove from the sidebar. Removing never deletes the conversation from `~/.claude/projects`.
-- Closing a tab stops that Claude process. Click the session again to resume it.
+- Closing a tab (or middle-clicking it) stops that Claude process; it asks first while Claude is mid-turn. Click the session again to resume it.
+- Open tabs come back when you restart the app. Only the active one starts right away; the others start when you click them.
 - With the Daylight theme, also run `/theme` inside Claude and choose a light theme, since Claude draws its own colors.
 
 ### Keyboard shortcuts
@@ -56,6 +60,7 @@ Tab actions use Ctrl+Shift on Windows and Linux (like Windows Terminal), so plai
 |---|---|---|
 | New session | Ctrl+Shift+T | ⌘T |
 | Close tab | Ctrl+Shift+W | ⌘W |
+| Search sessions | Ctrl+Shift+P | ⌘P |
 | Fork current session | Ctrl+Shift+D | ⌘D |
 | Show / hide changed files | Ctrl+Shift+G | ⌘⇧G |
 | Next / previous changed file | F8 / Shift+F8 | F8 / Shift+F8 |

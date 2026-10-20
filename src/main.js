@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, Notification, clipboard, shell, crashReporter } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Notification, clipboard, shell, crashReporter, Menu, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -148,6 +148,54 @@ function setStatus(id, status) {
 
 function windowAlive() {
   return win && !win.isDestroyed();
+}
+
+function windowStatePath() {
+  return path.join(app.getPath('userData'), 'window.json');
+}
+
+// Saved bounds are dropped when no display shows them any more, e.g. after unplugging a monitor.
+function loadWindowState() {
+  try {
+    const saved = JSON.parse(fs.readFileSync(windowStatePath(), 'utf8'));
+    const b = saved.bounds;
+    const visible = b && screen.getAllDisplays().some((d) => {
+      const area = d.workArea;
+      return b.x < area.x + area.width && b.x + b.width > area.x && b.y < area.y + area.height && b.y + b.height > area.y;
+    });
+    return { bounds: visible ? b : null, maximized: Boolean(saved.maximized) };
+  } catch (e) {
+    return { bounds: null, maximized: false };
+  }
+}
+
+function saveWindowState() {
+  try {
+    fs.writeFileSync(windowStatePath(), JSON.stringify({ bounds: win.getNormalBounds(), maximized: win.isMaximized() }));
+  } catch (e) {
+    log.warn('could not save window state', e.message);
+  }
+}
+
+// Shows a native menu built from plain items; resolves with the clicked item's id, or null when dismissed.
+function popupMenu(items) {
+  return new Promise((resolve) => {
+    const toTemplate = (list) => list.map((item) => {
+      if (item.type === 'separator') {
+        return { type: 'separator' };
+      }
+      return {
+        label: item.label,
+        type: item.submenu ? 'submenu' : item.type || 'normal',
+        checked: Boolean(item.checked),
+        enabled: item.enabled !== false,
+        submenu: item.submenu ? toTemplate(item.submenu) : undefined,
+        click: item.submenu ? undefined : () => resolve(item.id)
+      };
+    });
+    // The click handler can run after the menu reports it closed, so a dismissal resolves a moment later.
+    Menu.buildFromTemplate(toTemplate(items)).popup({ window: win, callback: () => setTimeout(() => resolve(null), 300) });
+  });
 }
 
 // Tells the user when a session they are not looking at needs input or has finished its turn.
@@ -460,6 +508,7 @@ function addSession(fields) {
 
 function registerIpc() {
   ipcMain.handle('state:get', () => ({
+    version: app.getVersion(),
     sessions: store.sessions,
     statuses: Object.fromEntries(store.sessions.map((s) => [s.id, statuses.get(s.id) || 'stopped']))
   }));
@@ -504,6 +553,15 @@ function registerIpc() {
     }
     saveStore();
     return session;
+  });
+  // Renaming a group to an existing name merges the two.
+  ipcMain.handle('session:renameGroup', (e, { from, to }) => {
+    for (const s of store.sessions) {
+      if (s.group === from) {
+        s.group = to;
+      }
+    }
+    saveStore();
   });
   // The sidebar shows sessions in store order, so reordering is a permutation of the stored list.
   ipcMain.handle('session:reorder', (e, ids) => {
@@ -563,6 +621,12 @@ function registerIpc() {
   ipcMain.on('link:open', (e, url) => openExternalLink(url));
   ipcMain.on('log:error', (e, message) => log.error('renderer', message));
   ipcMain.handle('clipboard:paste', () => readClipboardForPaste());
+  ipcMain.handle('menu:popup', (e, items) => popupMenu(items));
+  ipcMain.handle('session:openFolder', (e, id) => {
+    const session = findSession(id);
+    return session ? shell.openPath(session.cwd) : 'Session not found';
+  });
+  ipcMain.handle('app:openLogs', () => shell.openPath(path.join(app.getPath('userData'), 'logs')));
   ipcMain.handle('dialog:pickDir', async () => {
     const result = await dialog.showOpenDialog(win, { properties: ['openDirectory'] });
     return result.canceled ? null : result.filePaths[0];
@@ -641,9 +705,11 @@ app.whenReady().then(async () => {
   const frame = IS_MAC
     ? { titleBarStyle: 'hidden', trafficLightPosition: { x: 14, y: 13 } }
     : { titleBarStyle: 'hidden', titleBarOverlay: { color: '#161A20', symbolColor: '#E6E8EB', height: 40 } };
+  const windowState = loadWindowState();
   win = new BrowserWindow(Object.assign({
     width: 1440,
-    height: 900,
+    height: 900
+  }, windowState.bounds, {
     backgroundColor: '#0F1115',
     title: 'BetterCLI for Claude',
     autoHideMenuBar: true,
@@ -653,7 +719,14 @@ app.whenReady().then(async () => {
       nodeIntegration: false
     }
   }, frame));
-  win.on('focus', () => win.flashFrame(false));
+  if (windowState.maximized) {
+    win.maximize();
+  }
+  win.on('close', () => saveWindowState());
+  win.on('focus', () => {
+    win.flashFrame(false);
+    toRenderer('window:focus');
+  });
   win.on('unresponsive', () => log.warn('window unresponsive'));
   win.on('responsive', () => log.info('window responsive again'));
   win.webContents.on('render-process-gone', (e, details) => log.error('renderer gone', details));

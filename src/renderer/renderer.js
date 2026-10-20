@@ -12,7 +12,11 @@ const state = {
   changes: [],
   selectedChange: null,
   dragId: null,
-  treeStale: false
+  treeStale: false,
+  query: '',
+  searchIndex: 0,
+  activity: {},
+  version: ''
 };
 const IS_MAC = desk.platform === 'darwin';
 const FONT_MIN = 9;
@@ -85,7 +89,6 @@ function applyTheme(name) {
   }
   desk.setTitleBar({ color: theme.ui.panel, symbolColor: theme.ui.text });
   writeSetting('theme', state.theme);
-  $('theme').value = state.theme;
 }
 
 function groupNames() {
@@ -130,6 +133,12 @@ function sectionHead(key, label, count, extraHtml) {
     }
     toggleSection(key);
   });
+  if (key !== HISTORY_KEY) {
+    head.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      groupMenu(key);
+    });
+  }
   return head;
 }
 
@@ -139,6 +148,7 @@ function toggleSection(key) {
   } else {
     state.collapsed.add(key);
   }
+  writeSetting('collapsed', JSON.stringify([...state.collapsed]));
   if (key === HISTORY_KEY && !state.collapsed.has(key) && !state.historyLoaded) {
     loadHistory();
   }
@@ -212,9 +222,15 @@ function makeDraggable(item, s) {
   });
 }
 
-function sessionRow(s, depth) {
+function lastUsed(id) {
+  const used = state.activity[id];
+  return used ? timeAgo(used) : '';
+}
+
+function sessionRow(s, depth, highlighted) {
   const item = document.createElement('div');
-  item.className = 'item' + (s.id === state.active ? ' selected' : '') + (s.retired ? ' retired' : '');
+  item.className = 'item' + (s.id === state.active ? ' selected' : '') + (s.retired ? ' retired' : '') + (highlighted ? ' hl' : '');
+  item.dataset.id = s.id;
   item.style.paddingLeft = (8 + depth * 16) + 'px';
   item.title = s.retired ? 'Replaced by a fresh agent from a summary. ' + s.cwd : s.cwd;
   makeDraggable(item, s);
@@ -223,6 +239,7 @@ function sessionRow(s, depth) {
     dot(s.id) +
     (isOrchestrator(s) ? ICONS.orch : '') +
     `<span class="name">${esc(s.title)}</span>` +
+    `<span class="meta" title="Last used">${lastUsed(s.id)}</span>` +
     '<span class="actions">' +
     (isOrchestrator(s) ? '' : `<button class="icon-btn" data-act="fork" title="Fork" aria-label="Fork">${ICONS.fork}</button>`) +
     `<button class="icon-btn" data-act="edit" title="Edit" aria-label="Edit">${ICONS.edit}</button>` +
@@ -238,11 +255,18 @@ function sessionRow(s, depth) {
       openSession(s.id);
     }
   });
+  item.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    sessionMenu(s.id);
+  });
   return item;
 }
 
 function timeAgo(ms) {
   const minutes = Math.round((Date.now() - ms) / 60000);
+  if (minutes < 1) {
+    return 'now';
+  }
   if (minutes < 60) {
     return minutes + 'm';
   }
@@ -253,22 +277,25 @@ function timeAgo(ms) {
   return Math.round(hours / 24) + 'd';
 }
 
-function historyRow(h) {
+function historyRow(h, highlighted) {
   const item = document.createElement('div');
-  item.className = 'item';
+  item.className = 'item' + (highlighted ? ' hl' : '');
   item.title = h.cwd;
   const folder = h.cwd.split(/[\\/]/).filter(Boolean).pop();
   item.innerHTML =
     '<i class="dot stopped" title="Not in desk"></i>' +
     `<span class="name">${esc(h.title)}</span>` +
     `<span class="meta">${esc(folder)} · ${timeAgo(h.mtime)}</span>`;
-  item.addEventListener('click', async () => {
-    const session = await desk.importSession({ id: h.id, title: h.title, cwd: h.cwd });
-    state.sessions.push(session);
-    state.history = state.history.filter((x) => x.id !== h.id);
-    openSession(session.id);
-  });
+  item.addEventListener('click', () => importHistory(h));
   return item;
+}
+
+async function importHistory(h) {
+  const session = await desk.importSession({ id: h.id, title: h.title, cwd: h.cwd });
+  state.sessions.push(session);
+  state.history = state.history.filter((x) => x.id !== h.id);
+  state.activity[session.id] = h.mtime;
+  openSession(session.id);
 }
 
 function renderTree() {
@@ -280,6 +307,11 @@ function renderTree() {
   state.treeStale = false;
   const tree = $('tree');
   tree.innerHTML = '';
+  renderFooter();
+  if (state.query) {
+    renderSearch(tree);
+    return;
+  }
   const add = `<span class="icon-btn add" data-act="add" title="New session in this group" aria-label="New session in this group">${ICONS.plus}</span>`;
   for (const group of groupNames()) {
     const rows = flattenGroup(group);
@@ -300,6 +332,132 @@ function renderTree() {
   $('groups-list').innerHTML = groupNames().map((g) => `<option value="${esc(g)}">`).join('');
 }
 
+// ---- Search: every word must appear in the title, group or folder ----
+
+function matchesQuery(text) {
+  const haystack = text.toLowerCase();
+  return state.query.toLowerCase().split(/\s+/).filter(Boolean).every((word) => haystack.includes(word));
+}
+
+// Matches in sidebar order: sidebar sessions by group, then Claude CLI sessions.
+function searchResults() {
+  const results = [];
+  for (const group of groupNames()) {
+    for (const row of flattenGroup(group)) {
+      const s = row.session;
+      if (matchesQuery(s.title + ' ' + s.group + ' ' + s.cwd)) {
+        results.push({ session: s });
+      }
+    }
+  }
+  for (const h of state.history) {
+    if (matchesQuery(h.title + ' ' + h.cwd)) {
+      results.push({ history: h });
+    }
+  }
+  return results;
+}
+
+function renderSearch(tree) {
+  const results = searchResults();
+  state.searchIndex = Math.min(state.searchIndex, Math.max(0, results.length - 1));
+  let lastGroup = null;
+  results.forEach((r, index) => {
+    const group = r.session ? r.session.group : 'Claude CLI sessions';
+    if (group !== lastGroup) {
+      const head = document.createElement('div');
+      head.className = 'section-head static';
+      head.innerHTML = `<span class="label">${esc(group)}</span>`;
+      tree.appendChild(head);
+      lastGroup = group;
+    }
+    const highlighted = index === state.searchIndex;
+    tree.appendChild(r.session ? sessionRow(r.session, 0, highlighted) : historyRow(r.history, highlighted));
+  });
+  if (!results.length) {
+    tree.insertAdjacentHTML('beforeend', `<div class="tree-empty">No session matches “${esc(state.query)}”.</div>`);
+  }
+}
+
+function setQuery(text) {
+  state.query = text.trim();
+  state.searchIndex = 0;
+  if (state.query && !state.historyLoaded) {
+    loadHistory();
+  }
+  renderTree();
+}
+
+function openSearchResult() {
+  const result = searchResults()[state.searchIndex];
+  if (!result) {
+    return;
+  }
+  clearSearch();
+  if (result.session) {
+    openSession(result.session.id);
+  } else {
+    importHistory(result.history);
+  }
+}
+
+function clearSearch() {
+  $('search').value = '';
+  setQuery('');
+}
+
+function focusSearch() {
+  $('search').focus();
+  $('search').select();
+}
+
+function wireSearch() {
+  $('search-key').textContent = IS_MAC ? '⌘P' : 'Ctrl+Shift+P';
+  $('search').addEventListener('input', (e) => setQuery(e.target.value));
+  $('search').addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const count = searchResults().length;
+      if (count) {
+        state.searchIndex = (state.searchIndex + (e.key === 'ArrowDown' ? 1 : -1) + count) % count;
+        renderTree();
+        const hl = $('tree').querySelector('.item.hl');
+        if (hl) {
+          hl.scrollIntoView({ block: 'nearest' });
+        }
+      }
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      openSearchResult();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      clearSearch();
+      focusActiveTerminal();
+    }
+  });
+}
+
+function focusActiveTerminal() {
+  const entry = terms.get(state.active);
+  if (entry) {
+    entry.term.focus();
+  }
+}
+
+function renderFooter() {
+  const running = state.sessions.filter((s) => statusOf(s.id) !== 'stopped').length;
+  const total = state.sessions.length;
+  $('foot-summary').textContent = (running ? running + ' running · ' : '') + total + (total === 1 ? ' session' : ' sessions');
+}
+
+// Brings the open session's row into view, e.g. after opening it from a tab or a notification.
+function revealActive() {
+  const row = $('tree').querySelector('.item.selected');
+  if (row) {
+    row.scrollIntoView({ block: 'nearest' });
+  }
+}
+
 function renderTabs() {
   const tabs = $('tabs');
   tabs.innerHTML = '';
@@ -313,36 +471,68 @@ function renderTabs() {
       `<button class="icon-btn" data-act="close" title="Close and stop" aria-label="Close">${ICONS.close}</button>`;
     tab.addEventListener('click', (e) => {
       if (e.target.closest('[data-act="close"]')) {
-        closeTab(id);
+        requestCloseTab(id);
       } else {
         openSession(id);
       }
     });
+    tab.addEventListener('auxclick', (e) => {
+      if (e.button === 1) {
+        e.preventDefault();
+        requestCloseTab(id);
+      }
+    });
+    tab.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      sessionMenu(id);
+    });
     tabs.appendChild(tab);
   }
+  writeSetting('openTabs', JSON.stringify({ open: state.open, active: state.active }));
 }
 
+// Closing stops the Claude process, so a session that is mid-turn or waiting on a prompt asks first.
+function requestCloseTab(id) {
+  const status = statusOf(id);
+  const s = find(id);
+  if ((status === 'busy' || status === 'waiting') && s &&
+      !confirm(`Claude is ${status === 'busy' ? 'still working' : 'waiting for you'} in "${s.title}". Close the tab and stop it?`)) {
+    return;
+  }
+  closeTab(id);
+}
+
+// The active session's details and actions live in the status bar; the tab already shows its title.
 function renderHeader() {
   const s = find(state.active);
-  $('header').classList.toggle('hidden', !s);
+  $('statusbar').classList.toggle('hidden', !s);
   $('empty').classList.toggle('hidden', !!s);
   if (!s) {
-    $('statusbar').innerHTML = '';
+    renderRecent();
     return;
   }
   const parent = s.parentId ? find(s.parentId) : null;
   if (isOrchestrator(s)) {
     const count = workersOf(s.id).length;
-    $('crumb').textContent = s.group + '  ›  orchestration · ' + count + (count === 1 ? ' agent' : ' agents');
+    $('sb-crumb').textContent = s.group + '  ›  orchestration · ' + count + (count === 1 ? ' agent' : ' agents');
   } else {
-    $('crumb').textContent = s.group + (parent ? '  ›  forked from ' + parent.title : '');
+    $('sb-crumb').textContent = s.group + (parent ? '  ›  forked from ' + parent.title : '');
   }
   $('btn-fork').classList.toggle('hidden', isOrchestrator(s));
-  $('title').textContent = s.title;
-  $('statusbar').innerHTML =
-    `<span class="stat">${dot(s.id)}${STATUS_TEXT[statusOf(s.id)]}</span>` +
-    `<span class="mono">${esc(s.cwd)}</span>` +
-    `<span class="mono">${esc(s.id)}</span>`;
+  $('sb-status').innerHTML = `${dot(s.id)}${STATUS_TEXT[statusOf(s.id)]}`;
+  $('sb-cwd').textContent = s.cwd;
+  $('sb-cwd').title = 'Open folder: ' + s.cwd;
+}
+
+// The start screen offers the most recently used sessions, one click to resume.
+function renderRecent() {
+  const recent = state.sessions
+    .filter((s) => s.kind !== 'worker' && state.activity[s.id])
+    .sort((a, b) => state.activity[b.id] - state.activity[a.id])
+    .slice(0, 6);
+  $('recent').innerHTML = recent.length ? '<div class="recent-title">Recent</div>' + recent.map((s) =>
+    `<button class="recent-row" data-id="${esc(s.id)}">${dot(s.id)}<span class="name">${esc(s.title)}</span>` +
+    `<span class="meta">${esc(s.group)} · ${lastUsed(s.id)}</span></button>`).join('') : '';
 }
 
 function render() {
@@ -917,6 +1107,7 @@ async function openSession(id) {
     state.open.push(id);
   }
   state.active = id;
+  state.activity[id] = Date.now();
   desk.setActive(id);
   for (const [otherId, other] of terms) {
     if (!other.embedded) {
@@ -924,6 +1115,7 @@ async function openSession(id) {
     }
   }
   render();
+  revealActive();
   fitActive();
   entry.term.focus();
   refreshChanges();
@@ -995,6 +1187,9 @@ function shortcutFor(e) {
   if (tabMod && key === 'd') {
     return 'fork';
   }
+  if (tabMod && key === 'p') {
+    return 'search';
+  }
   if (e.shiftKey && key === 'g') {
     return 'changes';
   }
@@ -1025,7 +1220,9 @@ function runShortcut(action) {
   if (action === 'new') {
     openModal('new');
   } else if (action === 'close' && state.active) {
-    closeTab(state.active);
+    requestCloseTab(state.active);
+  } else if (action === 'search') {
+    focusSearch();
   } else if (action === 'fork' && state.active) {
     forkSession(state.active);
   } else if ((action === 'next' || action === 'prev') && state.open.length > 1) {
@@ -1226,6 +1423,160 @@ function forgetSessions(ids) {
   }
 }
 
+// ---- Right-click and settings menus (native menus built in the main process) ----
+
+function isMidTurn(id) {
+  const status = statusOf(id);
+  return status === 'busy' || status === 'waiting';
+}
+
+async function sessionMenu(id) {
+  const s = find(id);
+  if (!s) {
+    return;
+  }
+  const isOpen = state.open.includes(id);
+  const others = state.open.filter((x) => x !== id);
+  const choice = await desk.popupMenu([
+    { id: 'open', label: isOpen ? 'Switch to' : 'Open' },
+    { id: 'fork', label: 'Fork', enabled: !isOrchestrator(s) },
+    { id: 'edit', label: 'Rename or move…' },
+    { type: 'separator' },
+    { id: 'folder', label: 'Open folder' },
+    { id: 'copyId', label: 'Copy session ID' },
+    { id: 'copyResume', label: 'Copy resume command' },
+    { type: 'separator' },
+    { id: 'close', label: 'Close tab', enabled: isOpen },
+    { id: 'closeOthers', label: 'Close other tabs', enabled: others.length > 0 },
+    { id: 'remove', label: 'Remove from sidebar' }
+  ]);
+  if (choice === 'open') {
+    openSession(id);
+  } else if (choice === 'fork') {
+    forkSession(id);
+  } else if (choice === 'edit') {
+    openModal('edit', id);
+  } else if (choice === 'folder') {
+    desk.openFolder(id);
+  } else if (choice === 'copyId') {
+    navigator.clipboard.writeText(id);
+  } else if (choice === 'copyResume') {
+    // Claude Code finds a conversation by the folder it was started in, so the command changes there first.
+    navigator.clipboard.writeText(`cd "${s.cwd}"; claude --resume ${id}`);
+  } else if (choice === 'close') {
+    requestCloseTab(id);
+  } else if (choice === 'closeOthers') {
+    const busy = others.filter((x) => isMidTurn(x)).length;
+    if (busy && !confirm(`${busy} of the other tabs ${busy === 1 ? 'is' : 'are'} still in a turn. Close them and stop Claude there?`)) {
+      return;
+    }
+    for (const other of others) {
+      closeTab(other);
+    }
+    openSession(id);
+  } else if (choice === 'remove') {
+    if (isMidTurn(id) && !confirm(`Claude is still in a turn in "${s.title}". Stop it and remove it from the sidebar?`)) {
+      return;
+    }
+    removeSession(id);
+  }
+}
+
+async function groupMenu(group) {
+  const choice = await desk.popupMenu([
+    { id: 'new', label: 'New session in this group' },
+    { id: 'orch', label: 'New orchestration in this group' },
+    { id: 'rename', label: 'Rename group…' },
+    { type: 'separator' },
+    { id: 'collapseAll', label: 'Collapse all groups' },
+    { id: 'expandAll', label: 'Expand all groups' }
+  ]);
+  if (choice === 'new') {
+    openModal('new', null, group);
+  } else if (choice === 'orch') {
+    openModal('orch', null, group);
+  } else if (choice === 'rename') {
+    renameGroup(group);
+  } else if (choice === 'collapseAll' || choice === 'expandAll') {
+    for (const name of groupNames()) {
+      if (choice === 'collapseAll') {
+        state.collapsed.add(name);
+      } else {
+        state.collapsed.delete(name);
+      }
+    }
+    writeSetting('collapsed', JSON.stringify([...state.collapsed]));
+    renderTree();
+  }
+}
+
+async function renameGroup(group) {
+  const name = await askText('Rename group', 'Name (an existing group name merges the two)', group);
+  if (!name || name === group) {
+    return;
+  }
+  await desk.renameGroup(group, name);
+  for (const s of state.sessions) {
+    if (s.group === group) {
+      s.group = name;
+    }
+  }
+  if (state.collapsed.delete(group)) {
+    state.collapsed.add(name);
+    writeSetting('collapsed', JSON.stringify([...state.collapsed]));
+  }
+  render();
+}
+
+async function settingsMenu() {
+  const choice = await desk.popupMenu([
+    { label: 'Theme', submenu: Object.entries(THEMES).map(([key, t]) => ({ id: 'theme:' + key, label: t.label, type: 'radio', checked: key === state.theme })) },
+    { id: 'cleanup', label: 'Clean up sidebar…' },
+    { id: 'logs', label: 'Open logs folder' },
+    { type: 'separator' },
+    { label: 'BetterCLI ' + state.version, enabled: false }
+  ]);
+  if (choice && choice.startsWith('theme:')) {
+    applyTheme(choice.substring(6));
+  } else if (choice === 'cleanup') {
+    openCleanupModal();
+  } else if (choice === 'logs') {
+    desk.openLogs();
+  }
+}
+
+let textResolve = null;
+
+function finishText(value) {
+  const resolve = textResolve;
+  textResolve = null;
+  if (resolve) {
+    resolve(value);
+  }
+}
+
+// A one-field dialog; resolves with the trimmed text, or null when cancelled.
+function askText(title, label, value) {
+  finishText(null);
+  $('text-title').textContent = title;
+  $('text-label').textContent = label;
+  $('text-input').value = value || '';
+  $('text-modal').showModal();
+  $('text-input').select();
+  return new Promise((resolve) => {
+    textResolve = resolve;
+  });
+}
+
+function wireTextDialog() {
+  $('text-form').addEventListener('submit', () => finishText($('text-input').value.trim()));
+  $('text-cancel').addEventListener('click', () => {
+    $('text-modal').close();
+    finishText(null);
+  });
+  $('text-modal').addEventListener('cancel', () => finishText(null));
+}
+
 // ---- Clean up: take many sessions off the sidebar at once; their transcripts stay in Claude Code ----
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -1281,7 +1632,6 @@ function updateCleanup() {
 }
 
 function wireCleanup() {
-  $('btn-cleanup').addEventListener('click', () => openCleanupModal());
   $('cleanup-select').addEventListener('click', () => selectUnused());
   $('cleanup-days').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
@@ -1350,11 +1700,17 @@ function wireUi() {
     removeSession(modal.id);
   });
   $('modal-form').addEventListener('submit', () => submitModal());
-  $('theme').innerHTML = Object.entries(THEMES).map(([key, t]) => `<option value="${key}">${esc(t.label)}</option>`).join('');
-  $('theme').addEventListener('change', (e) => applyTheme(e.target.value));
+  $('btn-settings').addEventListener('click', () => settingsMenu());
+  $('sb-cwd').addEventListener('click', () => desk.openFolder(state.active));
+  $('recent').addEventListener('click', (e) => {
+    const row = e.target.closest('[data-id]');
+    if (row) {
+      openSession(row.dataset.id);
+    }
+  });
   // Capture phase, so shortcuts are handled before xterm sends the keys to Claude.
   window.addEventListener('keydown', (e) => {
-    if ($('modal').open || $('refresh-modal').open || $('cleanup-modal').open) {
+    if ($('modal').open || $('refresh-modal').open || $('cleanup-modal').open || $('text-modal').open) {
       return;
     }
     // Text fields (the plan box, task cards) keep their own keys; the terminal's hidden textarea does not count.
@@ -1371,7 +1727,20 @@ function wireUi() {
     runShortcut(action);
   }, true);
   $('btn-new').title = IS_MAC ? 'New session (⌘T)' : 'New session (Ctrl+Shift+T)';
+  $('btn-fork').title = IS_MAC ? 'Fork: a new session with this conversation (⌘D)' : 'Fork: a new session with this conversation (Ctrl+Shift+D)';
   new ResizeObserver(() => fitActive()).observe($('terminals'));
+}
+
+// Last-used times come from the transcripts on disk; reload them when the app comes back into view.
+async function loadActivity() {
+  const onDisk = await desk.getActivity();
+  for (const [id, time] of Object.entries(onDisk)) {
+    state.activity[id] = Math.max(state.activity[id] || 0, time);
+  }
+  renderTree();
+  if (!state.active) {
+    renderRecent();
+  }
 }
 
 function wireDesk() {
@@ -1427,8 +1796,12 @@ function wireDesk() {
       refreshChanges();
     }
   });
+  desk.onWindowFocus(() => loadActivity());
   desk.onStatus(({ id, status }) => {
     state.statuses[id] = status;
+    if (status !== 'stopped') {
+      state.activity[id] = Date.now();
+    }
     if (status === 'busy') {
       workedAgents.add(id);
     }
@@ -1441,16 +1814,47 @@ function wireDesk() {
 
 async function init() {
   document.body.classList.add('platform-' + desk.platform);
+  // Read before anything renders, since rendering the tabs saves them.
+  const savedTabs = readJsonSetting('openTabs', { open: [], active: null });
   wireUi();
+  wireSearch();
+  wireTextDialog();
   wireCleanup();
   wireDesk();
   applyTheme(readSetting('theme', 'midnight'));
   state.fontSize = Number(readSetting('fontSize', String(FONT_DEFAULT))) || FONT_DEFAULT;
   state.changesOpen = readSetting('changesOpen', '0') === '1';
+  state.collapsed = new Set(readJsonSetting('collapsed', [HISTORY_KEY]));
   const loaded = await desk.getState();
   state.sessions = loaded.sessions;
   state.statuses = loaded.statuses;
+  state.version = loaded.version;
+  await loadActivity();
+  restoreTabs(savedTabs);
   render();
+  setInterval(() => renderTree(), 60000);
+}
+
+function readJsonSetting(key, fallback) {
+  try {
+    return JSON.parse(readSetting(key, '')) || fallback;
+  } catch (e) {
+    return fallback;
+  }
+}
+
+// Reopens last run's tabs; only the active one starts Claude, the others start when clicked.
+function restoreTabs(saved) {
+  const canOpen = (id) => {
+    const s = find(id);
+    return Boolean(s) && s.kind !== 'worker';
+  };
+  state.open = (saved.open || []).filter(canOpen);
+  if (canOpen(saved.active) && state.open.includes(saved.active)) {
+    openSession(saved.active);
+  } else if (state.open.length) {
+    openSession(state.open[state.open.length - 1]);
+  }
 }
 
 window.addEventListener('error', (e) => desk.logError((e.error && e.error.stack) || e.message));
